@@ -15,11 +15,13 @@ public static class Program
 
         if (args.Contains("--headless-check"))
         {
-            Console.WriteLine("Headless check passed.");
+            using var headlessCheckApp = new EditorApp();
+            Console.WriteLine($"Headless check passed. Starter scene objects: {headlessCheckApp.Scene.ObjectCount}");
             return 0;
         }
 
-        Console.WriteLine("Leed3D Editor (GUI not initialized in headless mode. Run with --version or --headless-check).");
+        using var app = new EditorApp();
+        app.Run();
         return 0;
     }
 }
