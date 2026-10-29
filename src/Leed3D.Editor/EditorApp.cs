@@ -2,11 +2,15 @@ using System.Numerics;
 using ImGuiNET;
 using Leed3D.Editor.UI;
 using Leed3D.Editor.Viewport;
+using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Math;
 using Leed3D.Kernel.Primitives;
 using Leed3D.Kernel.Scene;
+using Leed3D.Kernel.Selection;
 using Leed3D.Kernel.Viewport;
 using Raylib_cs;
+using Color = Raylib_cs.Color;
+using RectangleF = System.Drawing.RectangleF;
 
 namespace Leed3D.Editor;
 
@@ -24,6 +28,7 @@ public sealed class EditorApp : IDisposable
     public UndoRedoStack UndoStack { get; } = new();
     public EditorCamera Camera { get; } = new();
     public PrimitiveCreationController PrimitiveController { get; }
+    public SelectionManager Selection { get; } = new();
 
     public ViewportShadingMode ShadingMode { get; set; } = ViewportShadingMode.SolidWithWireframe;
     public bool SnapToGridEnabled { get; set; } = true;
@@ -35,6 +40,14 @@ public sealed class EditorApp : IDisposable
     private bool _isViewportFocused;
     private Vector2 _viewportScreenMin;
     private Vector2 _viewportLocalMousePos;
+
+    private bool _isMouseDownInViewport;
+    private Vector2 _mouseDownLocalPos;
+    private Vector2 _mouseDownScreenPos;
+    private bool _isDraggingMarquee;
+    private Vector2 _mouseCurrentLocalPos;
+    private Vector2 _mouseCurrentScreenPos;
+
     private string _statusMessage = "Ready — Click primitive buttons to add, Shift+A for quick-add menu, RMB+WASD to fly.";
 
     public EditorApp()
@@ -49,7 +62,8 @@ public sealed class EditorApp : IDisposable
         Scene.AddMeshObject("Floor Block", floorMesh, new Vector3(0.0f, -0.25f, 0.0f));
 
         var boxMesh = PrimitiveGenerator.CreateBox(new Vector3(2.0f, 2.0f, 2.0f), materialId: "dev_grid_orange");
-        Scene.AddMeshObject("Starter Cube", boxMesh, new Vector3(0.0f, 1.0f, 0.0f));
+        SceneObject cubeObj = Scene.AddMeshObject("Starter Cube", boxMesh, new Vector3(0.0f, 1.0f, 0.0f));
+        Selection.SelectSingleObject(cubeObj.Id);
     }
 
     public void Run()
@@ -68,7 +82,7 @@ public sealed class EditorApp : IDisposable
             HandleGlobalShortcuts();
 
             // Render 3D scene into offscreen RenderTexture2D before drawing ImGui
-            _viewportRenderer.RenderScene(Scene, Camera, ShadingMode, CurrentGridStep);
+            _viewportRenderer.RenderScene(Scene, Camera, ShadingMode, CurrentGridStep, Selection);
 
             Raylib.BeginDrawing();
             Raylib.ClearBackground(new Color(20, 22, 25, 255));
@@ -91,6 +105,8 @@ public sealed class EditorApp : IDisposable
 
         bool ctrl = Raylib.IsKeyDown(KeyboardKey.LeftControl) || Raylib.IsKeyDown(KeyboardKey.RightControl);
         bool shift = Raylib.IsKeyDown(KeyboardKey.LeftShift) || Raylib.IsKeyDown(KeyboardKey.RightShift);
+        bool alt = Raylib.IsKeyDown(KeyboardKey.LeftAlt) || Raylib.IsKeyDown(KeyboardKey.RightAlt);
+        bool flying = Raylib.IsMouseButtonDown(MouseButton.Right);
 
         // Undo (Ctrl+Z) & Redo (Ctrl+Y or Ctrl+Shift+Z)
         if (ctrl && !shift && Raylib.IsKeyPressed(KeyboardKey.Z))
@@ -108,6 +124,46 @@ public sealed class EditorApp : IDisposable
             {
                 PrimitiveController.Dismiss();
                 _statusMessage = "Redid action.";
+            }
+        }
+
+        // Selection & Mode Shortcuts (when not in free-fly WASD mode)
+        if (!flying)
+        {
+            if (Raylib.IsKeyPressed(KeyboardKey.Tab))
+            {
+                Selection.ToggleObjectEditMode(Scene);
+                _statusMessage = $"Mode: {Selection.Mode}.";
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.One))
+            {
+                Selection.SetMode(InteractionMode.Vertex, Scene);
+                _statusMessage = "Vertex Select Mode (1).";
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.Two))
+            {
+                Selection.SetMode(InteractionMode.Edge, Scene);
+                _statusMessage = "Edge Select Mode (2).";
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.Three))
+            {
+                Selection.SetMode(InteractionMode.Face, Scene);
+                _statusMessage = "Face Select Mode (3).";
+            }
+            else if (ctrl && Raylib.IsKeyPressed(KeyboardKey.I))
+            {
+                Selection.InvertSelection(Scene);
+                _statusMessage = $"Inverted {Selection.Mode} selection.";
+            }
+            else if (alt && Raylib.IsKeyPressed(KeyboardKey.A))
+            {
+                Selection.ClearSelection();
+                _statusMessage = "Cleared selection (Alt+A).";
+            }
+            else if (!ctrl && !alt && !shift && Raylib.IsKeyPressed(KeyboardKey.A))
+            {
+                Selection.SelectAll(Scene);
+                _statusMessage = $"Selected all ({Selection.Mode} mode).";
             }
         }
     }
@@ -292,6 +348,7 @@ public sealed class EditorApp : IDisposable
         }
 
         SceneObject obj = PrimitiveController.SpawnPrimitive(type, spawnPos);
+        Selection.SelectSingleObject(obj.Id);
         _statusMessage = $"Spawned {obj.Name} at ({spawnPos.X:0.#}, {spawnPos.Y:0.#}, {spawnPos.Z:0.#}). Adjust parameters in the overlay panel.";
     }
 
@@ -335,6 +392,25 @@ public sealed class EditorApp : IDisposable
 
         DrawViewportAxisCompassOverlay(_viewportScreenMin, new Vector2(targetW, targetH));
 
+        // Vertex selection overlay (dots / squares) in Vertex mode
+        if (Selection.Mode == InteractionMode.Vertex && Selection.ActiveObjectId.HasValue)
+        {
+            DrawVertexSelectionOverlay(new Vector2(targetW, targetH));
+        }
+
+        // Marquee drag selection box overlay
+        if (_isDraggingMarquee)
+        {
+            ImDrawListPtr drawList = ImGui.GetWindowDrawList();
+            Vector2 min = Vector2.Min(_mouseDownScreenPos, _mouseCurrentScreenPos);
+            Vector2 max = Vector2.Max(_mouseDownScreenPos, _mouseCurrentScreenPos);
+
+            drawList.PushClipRect(_viewportScreenMin, _viewportScreenMin + new Vector2(targetW, targetH), true);
+            drawList.AddRectFilled(min, max, 0x33FFA020);
+            drawList.AddRect(min, max, 0xEEFFA020, 0.0f, ImDrawFlags.None, 1.5f);
+            drawList.PopClipRect();
+        }
+
         // Interactive "Adjust Last Operation" overlay popup in bottom-left corner of viewport
         if (PrimitiveController.IsActive)
         {
@@ -346,13 +422,38 @@ public sealed class EditorApp : IDisposable
             UpdateViewportCameraInput(dt, new Vector2(targetW, targetH));
         }
 
+        UpdateViewportSelectionInput(new Vector2(targetW, targetH));
+
         ImGui.End();
     }
 
     private void DrawViewportHeaderToolbar()
     {
-        // 1. Projection Mode Selector
-        ImGui.TextDisabled("View:");
+        // 0. Interaction Mode Selector
+        ImGui.TextDisabled("Mode:");
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Object", Selection.Mode == InteractionMode.Object))
+        {
+            Selection.SetMode(InteractionMode.Object, Scene);
+        }
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Vertex (1)", Selection.Mode == InteractionMode.Vertex))
+        {
+            Selection.SetMode(InteractionMode.Vertex, Scene);
+        }
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Edge (2)", Selection.Mode == InteractionMode.Edge))
+        {
+            Selection.SetMode(InteractionMode.Edge, Scene);
+        }
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Face (3)", Selection.Mode == InteractionMode.Face))
+        {
+            Selection.SetMode(InteractionMode.Face, Scene);
+        }
+
+        ImGui.SameLine();
+        ImGui.TextDisabled("| View:");
         ImGui.SameLine();
         if (ImGui.RadioButton("Persp", Camera.ProjectionMode == ViewportProjectionMode.Perspective))
         {
@@ -620,6 +721,295 @@ public sealed class EditorApp : IDisposable
         }
     }
 
+    private void DrawVertexSelectionOverlay(Vector2 viewportSize)
+    {
+        if (!Selection.ActiveObjectId.HasValue)
+        {
+            return;
+        }
+
+        SceneObject? activeObj = Scene.GetObject(Selection.ActiveObjectId.Value);
+        if (activeObj?.Mesh is null)
+        {
+            return;
+        }
+
+        Matrix4x4 localToWorld = activeObj.Transform.GetLocalMatrix();
+        ImDrawListPtr drawList = ImGui.GetWindowDrawList();
+        drawList.PushClipRect(_viewportScreenMin, _viewportScreenMin + viewportSize, true);
+
+        const uint unselectedDotColor = 0xFF805520;
+        const uint unselectedBorderColor = 0xFFD0A040;
+        const uint selectedSquareColor = 0xFF18A0FF;
+        const uint selectedBorderColor = 0xFFFFFFFF;
+
+        foreach (MeshVertex vertex in activeObj.Mesh.Vertices)
+        {
+            Vector3 wPos = Vector3.Transform(vertex.Position, localToWorld);
+            Vector2? sPos = Camera.WorldToScreenPoint(wPos, viewportSize);
+            if (!sPos.HasValue)
+            {
+                continue;
+            }
+
+            Vector2 pt = _viewportScreenMin + sPos.Value;
+            bool isSelected = Selection.SelectedVertexIds.Contains(vertex.Id);
+
+            if (isSelected)
+            {
+                // 8px bright orange/yellow square with white outline
+                drawList.AddRectFilled(pt - new Vector2(4, 4), pt + new Vector2(4, 4), selectedSquareColor);
+                drawList.AddRect(pt - new Vector2(4, 4), pt + new Vector2(4, 4), selectedBorderColor, 0.0f, ImDrawFlags.None, 1.0f);
+            }
+            else
+            {
+                // 5px cyan/dark dot
+                drawList.AddCircleFilled(pt, 2.5f, unselectedDotColor);
+                drawList.AddCircle(pt, 2.5f, unselectedBorderColor, 0, 1.0f);
+            }
+        }
+
+        drawList.PopClipRect();
+    }
+
+    private void UpdateViewportSelectionInput(Vector2 viewportSize)
+    {
+        // Don't interfere if right or middle mouse buttons are used for camera navigation
+        if (Raylib.IsMouseButtonDown(MouseButton.Right) || Raylib.IsMouseButtonDown(MouseButton.Middle))
+        {
+            _isMouseDownInViewport = false;
+            _isDraggingMarquee = false;
+            return;
+        }
+
+        Vector2 mouseScreen = ImGui.GetMousePos();
+
+        // Check if mouse is over adjust primitive overlay window in bottom-left
+        bool overAdjustOverlay = false;
+        if (PrimitiveController.IsActive)
+        {
+            const float overlayWidth = 280.0f;
+            const float margin = 12.0f;
+            Vector2 overlayPos = new(_viewportScreenMin.X + margin, _viewportScreenMin.Y + viewportSize.Y - 240.0f);
+            if (mouseScreen.X >= overlayPos.X && mouseScreen.X <= overlayPos.X + overlayWidth &&
+                mouseScreen.Y >= overlayPos.Y && mouseScreen.Y <= _viewportScreenMin.Y + viewportSize.Y)
+            {
+                overAdjustOverlay = true;
+            }
+        }
+
+        // 1. Mouse Down
+        if (_isViewportHovered && !overAdjustOverlay && Raylib.IsMouseButtonPressed(MouseButton.Left))
+        {
+            if (!ImGui.IsAnyItemActive())
+            {
+                _isMouseDownInViewport = true;
+                _mouseDownLocalPos = _viewportLocalMousePos;
+                _mouseDownScreenPos = mouseScreen;
+                _mouseCurrentLocalPos = _viewportLocalMousePos;
+                _mouseCurrentScreenPos = mouseScreen;
+                _isDraggingMarquee = false;
+            }
+        }
+
+        // 2. Mouse Dragging
+        if (_isMouseDownInViewport && Raylib.IsMouseButtonDown(MouseButton.Left))
+        {
+            _mouseCurrentLocalPos = _viewportLocalMousePos;
+            _mouseCurrentScreenPos = mouseScreen;
+
+            if (!_isDraggingMarquee && Vector2.Distance(_mouseDownScreenPos, mouseScreen) > 4.0f)
+            {
+                _isDraggingMarquee = true;
+            }
+        }
+
+        // 3. Mouse Released
+        if (_isMouseDownInViewport && Raylib.IsMouseButtonReleased(MouseButton.Left))
+        {
+            _isMouseDownInViewport = false;
+            bool shiftHeld = Raylib.IsKeyDown(KeyboardKey.LeftShift) || Raylib.IsKeyDown(KeyboardKey.RightShift);
+
+            if (_isDraggingMarquee)
+            {
+                _isDraggingMarquee = false;
+                ExecuteMarqueeSelection(viewportSize, shiftHeld);
+            }
+            else
+            {
+                ExecuteSingleClickPicking(viewportSize, shiftHeld);
+            }
+        }
+    }
+
+    private void ExecuteMarqueeSelection(Vector2 viewportSize, bool shiftHeld)
+    {
+        float minX = System.Math.Min(_mouseDownLocalPos.X, _mouseCurrentLocalPos.X);
+        float maxX = System.Math.Max(_mouseDownLocalPos.X, _mouseCurrentLocalPos.X);
+        float minY = System.Math.Min(_mouseDownLocalPos.Y, _mouseCurrentLocalPos.Y);
+        float maxY = System.Math.Max(_mouseDownLocalPos.Y, _mouseCurrentLocalPos.Y);
+        var screenRect = new RectangleF(minX, minY, System.Math.Max(1.0f, maxX - minX), System.Math.Max(1.0f, maxY - minY));
+
+        Func<Vector3, Vector2?> worldToScreen = pt => Camera.WorldToScreenPoint(pt, viewportSize);
+
+        if (Selection.Mode == InteractionMode.Object)
+        {
+            List<int> picked = MeshPicker.PickObjectsBoxMarquee(Scene, screenRect, worldToScreen);
+            if (!shiftHeld)
+            {
+                Selection.ClearSelection();
+            }
+
+            foreach (int id in picked)
+            {
+                Selection.ToggleSelectObject(id);
+            }
+
+            _statusMessage = $"Box selected {Selection.SelectedObjectIds.Count} object(s).";
+        }
+        else if (Selection.ActiveObjectId.HasValue && Scene.GetObject(Selection.ActiveObjectId.Value) is { } activeObj)
+        {
+            MarqueeSelectionResult res = MeshPicker.PickBoxMarquee(activeObj, Selection.Mode, screenRect, worldToScreen);
+
+            switch (Selection.Mode)
+            {
+                case InteractionMode.Vertex:
+                    if (!shiftHeld) Selection.ClearSelection();
+                    foreach (int vId in res.VertexIds) Selection.ToggleSelectVertex(vId);
+                    _statusMessage = $"Box selected {Selection.SelectedVertexIds.Count} vertex/vertices.";
+                    break;
+
+                case InteractionMode.Edge:
+                    if (!shiftHeld) Selection.ClearSelection();
+                    foreach (EdgeKey edge in res.Edges) Selection.ToggleSelectEdge(edge);
+                    _statusMessage = $"Box selected {Selection.SelectedEdges.Count} edge(s).";
+                    break;
+
+                case InteractionMode.Face:
+                    if (!shiftHeld) Selection.ClearSelection();
+                    foreach (int fId in res.FaceIds) Selection.ToggleSelectFace(fId);
+                    _statusMessage = $"Box selected {Selection.SelectedFaceIds.Count} face(s).";
+                    break;
+            }
+        }
+    }
+
+    private void ExecuteSingleClickPicking(Vector2 viewportSize, bool shiftHeld)
+    {
+        Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, viewportSize);
+        Func<Vector3, Vector2?> worldToScreen = pt => Camera.WorldToScreenPoint(pt, viewportSize);
+
+        if (Selection.Mode == InteractionMode.Object)
+        {
+            ObjectHit? hit = MeshPicker.PickObject(Scene, ray);
+            if (hit.HasValue)
+            {
+                if (shiftHeld)
+                {
+                    Selection.ToggleSelectObject(hit.Value.ObjectId);
+                }
+                else
+                {
+                    Selection.SelectSingleObject(hit.Value.ObjectId);
+                }
+
+                SceneObject? obj = Scene.GetObject(hit.Value.ObjectId);
+                _statusMessage = $"Selected '{obj?.Name ?? "Object"}' (Face {hit.Value.FaceId}). Total: {Selection.SelectedObjectIds.Count}.";
+            }
+            else if (!shiftHeld)
+            {
+                Selection.ClearSelection();
+                _statusMessage = "Cleared selection.";
+            }
+        }
+        else if (Selection.ActiveObjectId.HasValue && Scene.GetObject(Selection.ActiveObjectId.Value) is { } activeObj)
+        {
+            switch (Selection.Mode)
+            {
+                case InteractionMode.Vertex:
+                {
+                    int? pickedVert = MeshPicker.PickVertex(
+                        activeObj,
+                        worldToScreen,
+                        _viewportLocalMousePos,
+                        maxPixelDistance: 12.0f,
+                        cameraPos: Camera.Position);
+
+                    if (pickedVert.HasValue)
+                    {
+                        if (shiftHeld)
+                        {
+                            Selection.ToggleSelectVertex(pickedVert.Value);
+                        }
+                        else
+                        {
+                            Selection.SelectSingleVertex(pickedVert.Value);
+                        }
+
+                        _statusMessage = $"Selected Vertex {pickedVert.Value}. Total: {Selection.SelectedVertexIds.Count}.";
+                    }
+                    else if (!shiftHeld)
+                    {
+                        Selection.ClearSelection();
+                    }
+                    break;
+                }
+
+                case InteractionMode.Edge:
+                {
+                    EdgeKey? pickedEdge = MeshPicker.PickEdge(
+                        activeObj,
+                        ray,
+                        worldToScreen,
+                        _viewportLocalMousePos,
+                        maxPixelDistance: 10.0f);
+
+                    if (pickedEdge.HasValue)
+                    {
+                        if (shiftHeld)
+                        {
+                            Selection.ToggleSelectEdge(pickedEdge.Value);
+                        }
+                        else
+                        {
+                            Selection.SelectSingleEdge(pickedEdge.Value);
+                        }
+
+                        _statusMessage = $"Selected Edge ({pickedEdge.Value.VMin}, {pickedEdge.Value.VMax}). Total: {Selection.SelectedEdges.Count}.";
+                    }
+                    else if (!shiftHeld)
+                    {
+                        Selection.ClearSelection();
+                    }
+                    break;
+                }
+
+                case InteractionMode.Face:
+                {
+                    FaceHit? pickedFace = MeshPicker.PickFace(activeObj, ray, ignoreBackfaces: true);
+                    if (pickedFace.HasValue)
+                    {
+                        if (shiftHeld)
+                        {
+                            Selection.ToggleSelectFace(pickedFace.Value.FaceId);
+                        }
+                        else
+                        {
+                            Selection.SelectSingleFace(pickedFace.Value.FaceId);
+                        }
+
+                        _statusMessage = $"Selected Face {pickedFace.Value.FaceId}. Total: {Selection.SelectedFaceIds.Count}.";
+                    }
+                    else if (!shiftHeld)
+                    {
+                        Selection.ClearSelection();
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     private void UpdateViewportCameraInput(float dt, Vector2 viewportSize)
     {
         ImGuiIOPtr io = ImGui.GetIO();
@@ -787,7 +1177,19 @@ public sealed class EditorApp : IDisposable
         ImGui.PopStyleVar(2);
 
         Vector3 camPos = Camera.Position;
-        ImGui.Text($"{_statusMessage}  |  Cam: ({camPos.X:0.0}, {camPos.Y:0.0}, {camPos.Z:0.0})  |  View: {Camera.ProjectionMode}  |  Objects: {Scene.ObjectCount}  |  FPS: {Raylib.GetFPS()}");
+        string selectionInfo = Selection.Mode switch
+        {
+            InteractionMode.Object => $"Sel: {Selection.SelectedObjectIds.Count} obj",
+            InteractionMode.Vertex => $"Sel: {Selection.SelectedVertexIds.Count} vert",
+            InteractionMode.Edge => $"Sel: {Selection.SelectedEdges.Count} edge",
+            InteractionMode.Face => $"Sel: {Selection.SelectedFaceIds.Count} face",
+            _ => ""
+        };
+
+        Vector3? pivot = Selection.GetSelectionPivotWorld(Scene);
+        string pivotInfo = pivot.HasValue ? $"Pivot: ({pivot.Value.X:0.#}, {pivot.Value.Y:0.#}, {pivot.Value.Z:0.#})" : "Pivot: none";
+
+        ImGui.Text($"{_statusMessage}  |  [{Selection.Mode}] {selectionInfo} | {pivotInfo}  |  Cam: ({camPos.X:0.0}, {camPos.Y:0.0}, {camPos.Z:0.0})  |  FPS: {Raylib.GetFPS()}");
 
         ImGui.End();
     }

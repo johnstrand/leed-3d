@@ -2,6 +2,7 @@ using System.Numerics;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Math;
 using Leed3D.Kernel.Scene;
+using Leed3D.Kernel.Selection;
 using Leed3D.Kernel.Viewport;
 using Raylib_cs;
 
@@ -60,7 +61,8 @@ public sealed class ViewportRenderer : IDisposable
         EditorScene scene,
         EditorCamera camera,
         ViewportShadingMode shadingMode,
-        float gridStep)
+        float gridStep,
+        SelectionManager? selection = null)
     {
         if (_renderTarget.Id == 0)
         {
@@ -94,7 +96,7 @@ public sealed class ViewportRenderer : IDisposable
                 continue;
             }
 
-            DrawMeshObject(obj, shadingMode);
+            DrawMeshObject(obj, shadingMode, selection);
         }
 
         Rlgl.DrawRenderBatchActive();
@@ -188,13 +190,23 @@ public sealed class ViewportRenderer : IDisposable
         Rlgl.End();
     }
 
-    private static void DrawMeshObject(SceneObject obj, ViewportShadingMode shadingMode)
+    private static void DrawMeshObject(SceneObject obj, ViewportShadingMode shadingMode, SelectionManager? selection)
     {
         EditableMesh mesh = obj.Mesh!;
         Matrix4x4 worldMatrix = obj.Transform.GetLocalMatrix();
 
+        bool isObjectSelected = selection is not null &&
+            selection.Mode == InteractionMode.Object &&
+            selection.SelectedObjectIds.Contains(obj.Id);
+
+        bool isEditModeActive = selection is not null &&
+            selection.Mode != InteractionMode.Object &&
+            selection.ActiveObjectId == obj.Id;
+
         bool drawSolid = shadingMode != ViewportShadingMode.Wireframe;
-        bool drawWireframe = shadingMode is ViewportShadingMode.SolidWithWireframe or ViewportShadingMode.Wireframe;
+        // In Edit Mode, the active object always draws its wireframe topology
+        bool drawWireframe = isEditModeActive ||
+            shadingMode is ViewportShadingMode.SolidWithWireframe or ViewportShadingMode.Wireframe;
 
         if (drawSolid)
         {
@@ -242,10 +254,67 @@ public sealed class ViewportRenderer : IDisposable
             Rlgl.End();
         }
 
-        // Draw true N-gon topological edges (not internal triangulation diagonals!)
-        if (drawWireframe)
+        // Selected faces overlay in Face Mode (semi-transparent orange fill)
+        HashSet<EdgeKey>? selectedFaceBoundaryEdges = null;
+        if (isEditModeActive && selection!.Mode == InteractionMode.Face && selection.SelectedFaceIds.Count > 0)
         {
-            Color edgeColor = shadingMode == ViewportShadingMode.Wireframe ? PureWireframeColor : WireframeEdgeColor;
+            selectedFaceBoundaryEdges = [];
+            Color selectedFaceFill = new(255, 175, 45, 120);
+
+            Rlgl.Begin(DrawMode.Triangles);
+            foreach (int fId in selection.SelectedFaceIds)
+            {
+                PolygonFace? face = mesh.GetFace(fId);
+                if (face is null)
+                {
+                    continue;
+                }
+
+                int count = face.VertexIds.Count;
+                for (int i = 0; i < count; i++)
+                {
+                    selectedFaceBoundaryEdges.Add(new EdgeKey(face.VertexIds[i], face.VertexIds[(i + 1) % count]));
+                }
+
+                IReadOnlyList<(int V0, int V1, int V2)> tris = PolygonTriangulator.TriangulateFace(face, mesh);
+                for (int tIdx = 0; tIdx < tris.Count; tIdx++)
+                {
+                    if (Rlgl.CheckRenderBatchLimit(3))
+                    {
+                        Rlgl.Begin(DrawMode.Triangles);
+                    }
+
+                    var (v0Id, v1Id, v2Id) = tris[tIdx];
+                    var (w0Id, w1Id, w2Id) = CoordSpace.FlipTriangleWinding(v0Id, v1Id, v2Id);
+
+                    MeshVertex? mv0 = mesh.GetVertex(w0Id);
+                    MeshVertex? mv1 = mesh.GetVertex(w1Id);
+                    MeshVertex? mv2 = mesh.GetVertex(w2Id);
+                    if (mv0 is null || mv1 is null || mv2 is null)
+                    {
+                        continue;
+                    }
+
+                    Vector3 p0Rh = CoordSpace.ToRightHanded(Vector3.Transform(mv0.Position, worldMatrix));
+                    Vector3 p1Rh = CoordSpace.ToRightHanded(Vector3.Transform(mv1.Position, worldMatrix));
+                    Vector3 p2Rh = CoordSpace.ToRightHanded(Vector3.Transform(mv2.Position, worldMatrix));
+
+                    Rlgl.Color4ub(selectedFaceFill.R, selectedFaceFill.G, selectedFaceFill.B, selectedFaceFill.A);
+                    Rlgl.Vertex3f(p0Rh.X, p0Rh.Y, p0Rh.Z);
+                    Rlgl.Vertex3f(p1Rh.X, p1Rh.Y, p1Rh.Z);
+                    Rlgl.Vertex3f(p2Rh.X, p2Rh.Y, p2Rh.Z);
+                }
+            }
+            Rlgl.End();
+        }
+
+        // Draw true N-gon topological edges (not internal triangulation diagonals!)
+        if (drawWireframe || isObjectSelected)
+        {
+            Color defaultEdgeColor = shadingMode == ViewportShadingMode.Wireframe ? PureWireframeColor : WireframeEdgeColor;
+            Color objectHighlightColor = new(255, 140, 30, 255);
+            Color selectedSubEdgeColor = new(255, 150, 30, 255);
+
             TopologyGraph topology = mesh.GetTopology();
 
             Rlgl.Begin(DrawMode.Lines);
@@ -267,7 +336,24 @@ public sealed class ViewportRenderer : IDisposable
                 Vector3 pA = Vector3.Transform(vA.Position, worldMatrix);
                 Vector3 pB = Vector3.Transform(vB.Position, worldMatrix);
 
-                // Slightly bias wireframe edges toward camera or outward normal to avoid Z-fighting
+                Color edgeColor = defaultEdgeColor;
+
+                if (isObjectSelected)
+                {
+                    edgeColor = objectHighlightColor;
+                }
+                else if (isEditModeActive)
+                {
+                    if (selection!.Mode == InteractionMode.Edge && selection.SelectedEdges.Contains(edgeKey))
+                    {
+                        edgeColor = selectedSubEdgeColor;
+                    }
+                    else if (selection!.Mode == InteractionMode.Face && selectedFaceBoundaryEdges is not null && selectedFaceBoundaryEdges.Contains(edgeKey))
+                    {
+                        edgeColor = selectedSubEdgeColor;
+                    }
+                }
+
                 EmitLineEditorSpace(pA, pB, edgeColor);
             }
             Rlgl.End();
