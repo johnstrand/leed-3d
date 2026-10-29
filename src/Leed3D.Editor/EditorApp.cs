@@ -13,7 +13,8 @@ namespace Leed3D.Editor;
 /// <summary>
 /// Main desktop application shell managing the Raylib window, RlImGui docking workspace,
 /// top menu bar, viewport header bar (Projection, Shading, Grid & Angle Snap controls),
-/// 3D viewport camera navigation, and status bar.
+/// 3D viewport camera navigation, primitive creation toolbar, Shift+A quick-add menu,
+/// interactive adjust-primitive popup, and status bar.
 /// </summary>
 public sealed class EditorApp : IDisposable
 {
@@ -22,6 +23,7 @@ public sealed class EditorApp : IDisposable
     public EditorScene Scene { get; } = new("Untitled Level");
     public UndoRedoStack UndoStack { get; } = new();
     public EditorCamera Camera { get; } = new();
+    public PrimitiveCreationController PrimitiveController { get; }
 
     public ViewportShadingMode ShadingMode { get; set; } = ViewportShadingMode.SolidWithWireframe;
     public bool SnapToGridEnabled { get; set; } = true;
@@ -33,10 +35,11 @@ public sealed class EditorApp : IDisposable
     private bool _isViewportFocused;
     private Vector2 _viewportScreenMin;
     private Vector2 _viewportLocalMousePos;
-    private string _statusMessage = "Ready — Hold RMB + WASD to fly, MMB to pan, Alt+LMB to orbit, Scroll to zoom.";
+    private string _statusMessage = "Ready — Click primitive buttons to add, Shift+A for quick-add menu, RMB+WASD to fly.";
 
     public EditorApp()
     {
+        PrimitiveController = new PrimitiveCreationController(Scene, UndoStack);
         InitializeDefaultStarterScene();
     }
 
@@ -94,6 +97,7 @@ public sealed class EditorApp : IDisposable
         {
             if (UndoStack.Undo(Scene))
             {
+                PrimitiveController.Dismiss();
                 _statusMessage = "Undid last action.";
             }
         }
@@ -102,6 +106,7 @@ public sealed class EditorApp : IDisposable
         {
             if (UndoStack.Redo(Scene))
             {
+                PrimitiveController.Dismiss();
                 _statusMessage = "Redid action.";
             }
         }
@@ -160,6 +165,7 @@ public sealed class EditorApp : IDisposable
                 EditorScene before = Scene.CloneSnapshot();
                 Scene.RestoreFromSnapshot(new EditorScene("Untitled Level"));
                 UndoStack.RecordAction("New Level", before, Scene);
+                PrimitiveController.Dismiss();
                 _statusMessage = "Created new empty level.";
             }
 
@@ -169,6 +175,7 @@ public sealed class EditorApp : IDisposable
                 Scene.RestoreFromSnapshot(new EditorScene("Untitled Level"));
                 InitializeDefaultStarterScene();
                 UndoStack.RecordAction("Reset Starter Scene", before, Scene);
+                PrimitiveController.Dismiss();
                 _statusMessage = "Reset starter blockout scene.";
             }
 
@@ -186,13 +193,21 @@ public sealed class EditorApp : IDisposable
             if (ImGui.MenuItem(undoLabel, "Ctrl+Z", false, UndoStack.CanUndo))
             {
                 UndoStack.Undo(Scene);
+                PrimitiveController.Dismiss();
             }
 
             string redoLabel = UndoStack.CanRedo ? $"Redo {UndoStack.NextRedoDescription}" : "Redo";
             if (ImGui.MenuItem(redoLabel, "Ctrl+Y", false, UndoStack.CanRedo))
             {
                 UndoStack.Redo(Scene);
+                PrimitiveController.Dismiss();
             }
+            ImGui.EndMenu();
+        }
+
+        if (ImGui.BeginMenu("Add"))
+        {
+            DrawPrimitiveMenuItems();
             ImGui.EndMenu();
         }
 
@@ -240,6 +255,46 @@ public sealed class EditorApp : IDisposable
         ImGui.EndMainMenuBar();
     }
 
+    private void DrawPrimitiveMenuItems()
+    {
+        if (ImGui.MenuItem("Plane"))
+        {
+            SpawnPrimitive(PrimitiveType.Plane);
+        }
+        if (ImGui.MenuItem("Box"))
+        {
+            SpawnPrimitive(PrimitiveType.Box);
+        }
+        if (ImGui.MenuItem("Cylinder"))
+        {
+            SpawnPrimitive(PrimitiveType.Cylinder);
+        }
+        if (ImGui.MenuItem("Cone"))
+        {
+            SpawnPrimitive(PrimitiveType.Cone);
+        }
+        if (ImGui.MenuItem("Geosphere"))
+        {
+            SpawnPrimitive(PrimitiveType.Geosphere);
+        }
+        if (ImGui.MenuItem("Icosahedron"))
+        {
+            SpawnPrimitive(PrimitiveType.Icosahedron);
+        }
+    }
+
+    public void SpawnPrimitive(PrimitiveType type)
+    {
+        Vector3 spawnPos = Vector3.Zero;
+        if (SnapToGridEnabled)
+        {
+            spawnPos = GridSnapper.SnapVector(spawnPos, CurrentGridStep);
+        }
+
+        SceneObject obj = PrimitiveController.SpawnPrimitive(type, spawnPos);
+        _statusMessage = $"Spawned {obj.Name} at ({spawnPos.X:0.#}, {spawnPos.Y:0.#}, {spawnPos.Z:0.#}). Adjust parameters in the overlay panel.";
+    }
+
     private void DrawViewportWindow(float dt)
     {
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(4.0f, 4.0f));
@@ -247,6 +302,7 @@ public sealed class EditorApp : IDisposable
         ImGui.PopStyleVar();
 
         DrawViewportHeaderToolbar();
+        DrawPrimitiveToolbar();
 
         Vector2 avail = ImGui.GetContentRegionAvail();
         int targetW = System.Math.Max(64, (int)avail.X);
@@ -262,7 +318,28 @@ public sealed class EditorApp : IDisposable
         Vector2 mouseScreen = ImGui.GetMousePos();
         _viewportLocalMousePos = mouseScreen - _viewportScreenMin;
 
+        // Shift+A Quick Add Menu in Viewport
+        bool shiftDown = Raylib.IsKeyDown(KeyboardKey.LeftShift) || Raylib.IsKeyDown(KeyboardKey.RightShift);
+        if (_isViewportHovered && shiftDown && Raylib.IsKeyPressed(KeyboardKey.A))
+        {
+            ImGui.OpenPopup("ShiftAQuickAddPopup");
+        }
+
+        if (ImGui.BeginPopup("ShiftAQuickAddPopup"))
+        {
+            ImGui.TextDisabled("Add Mesh Primitive");
+            ImGui.Separator();
+            DrawPrimitiveMenuItems();
+            ImGui.EndPopup();
+        }
+
         DrawViewportAxisCompassOverlay(_viewportScreenMin, new Vector2(targetW, targetH));
+
+        // Interactive "Adjust Last Operation" overlay popup in bottom-left corner of viewport
+        if (PrimitiveController.IsActive)
+        {
+            DrawAdjustPrimitiveOverlay(_viewportScreenMin, new Vector2(targetW, targetH));
+        }
 
         if (_isViewportHovered || Raylib.IsMouseButtonDown(MouseButton.Right) || Raylib.IsMouseButtonDown(MouseButton.Middle))
         {
@@ -370,6 +447,177 @@ public sealed class EditorApp : IDisposable
         }
 
         ImGui.Separator();
+    }
+
+    private void DrawPrimitiveToolbar()
+    {
+        ImGui.TextDisabled("Add Primitive:");
+        ImGui.SameLine();
+
+        if (ImGui.Button("Plane")) SpawnPrimitive(PrimitiveType.Plane);
+        ImGui.SameLine();
+        if (ImGui.Button("Box")) SpawnPrimitive(PrimitiveType.Box);
+        ImGui.SameLine();
+        if (ImGui.Button("Cylinder")) SpawnPrimitive(PrimitiveType.Cylinder);
+        ImGui.SameLine();
+        if (ImGui.Button("Cone")) SpawnPrimitive(PrimitiveType.Cone);
+        ImGui.SameLine();
+        if (ImGui.Button("Geosphere")) SpawnPrimitive(PrimitiveType.Geosphere);
+        ImGui.SameLine();
+        if (ImGui.Button("Icosahedron")) SpawnPrimitive(PrimitiveType.Icosahedron);
+
+        ImGui.Separator();
+    }
+
+    private void DrawAdjustPrimitiveOverlay(Vector2 viewportMin, Vector2 viewportSize)
+    {
+        const float overlayWidth = 280.0f;
+        const float margin = 12.0f;
+
+        Vector2 overlayPos = new(viewportMin.X + margin, viewportMin.Y + viewportSize.Y - 240.0f);
+        ImGui.SetNextWindowPos(overlayPos, ImGuiCond.Always);
+        ImGui.SetNextWindowSize(new Vector2(overlayWidth, 0.0f));
+
+        ImGuiWindowFlags flags =
+            ImGuiWindowFlags.NoMove |
+            ImGuiWindowFlags.NoResize |
+            ImGuiWindowFlags.AlwaysAutoResize |
+            ImGuiWindowFlags.NoSavedSettings;
+
+        ImGui.PushStyleColor(ImGuiCol.WindowBg, new Vector4(0.12f, 0.14f, 0.17f, 0.95f));
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 6.0f);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 1.0f);
+
+        string title = $"Adjust {PrimitiveController.ActivePrimitiveType}###AdjustLastPrimitivePopup";
+        bool open = true;
+
+        if (ImGui.Begin(title, ref open, flags))
+        {
+            bool changed = false;
+
+            switch (PrimitiveController.ActivePrimitiveType)
+            {
+                case PrimitiveType.Plane:
+                {
+                    PlaneParams p = PrimitiveController.PlaneParams;
+                    float w = p.Width;
+                    float d = p.Depth;
+                    int segW = p.WidthSegments;
+                    int segD = p.DepthSegments;
+
+                    if (ImGui.DragFloat("Width", ref w, 0.1f, 0.1f, 100.0f)) { p = p with { Width = w }; changed = true; }
+                    if (ImGui.DragFloat("Depth", ref d, 0.1f, 0.1f, 100.0f)) { p = p with { Depth = d }; changed = true; }
+                    if (ImGui.SliderInt("Width Segs", ref segW, 1, 32)) { p = p with { WidthSegments = segW }; changed = true; }
+                    if (ImGui.SliderInt("Depth Segs", ref segD, 1, 32)) { p = p with { DepthSegments = segD }; changed = true; }
+
+                    if (changed) PrimitiveController.PlaneParams = p;
+                    break;
+                }
+
+                case PrimitiveType.Box:
+                {
+                    BoxParams p = PrimitiveController.BoxParams;
+                    Vector3 size = p.Size;
+                    int segX = p.SegmentsX;
+                    int segY = p.SegmentsY;
+                    int segZ = p.SegmentsZ;
+                    bool inv = p.InvertNormals;
+
+                    if (ImGui.DragFloat3("Size", ref size, 0.1f, 0.1f, 100.0f)) { p = p with { Size = size }; changed = true; }
+                    if (ImGui.SliderInt("Segments X", ref segX, 1, 32)) { p = p with { SegmentsX = segX }; changed = true; }
+                    if (ImGui.SliderInt("Segments Y", ref segY, 1, 32)) { p = p with { SegmentsY = segY }; changed = true; }
+                    if (ImGui.SliderInt("Segments Z", ref segZ, 1, 32)) { p = p with { SegmentsZ = segZ }; changed = true; }
+                    if (ImGui.Checkbox("Invert Normals (Room)", ref inv)) { p = p with { InvertNormals = inv }; changed = true; }
+
+                    if (changed) PrimitiveController.BoxParams = p;
+                    break;
+                }
+
+                case PrimitiveType.Cylinder:
+                {
+                    CylinderParams p = PrimitiveController.CylinderParams;
+                    float radius = p.Radius;
+                    float height = p.Height;
+                    int radSeg = p.RadialSegments;
+                    int hSeg = p.HeightSegments;
+                    bool capTop = p.CapTop;
+                    bool capBottom = p.CapBottom;
+
+                    if (ImGui.DragFloat("Radius", ref radius, 0.05f, 0.1f, 50.0f)) { p = p with { Radius = radius }; changed = true; }
+                    if (ImGui.DragFloat("Height", ref height, 0.1f, 0.1f, 100.0f)) { p = p with { Height = height }; changed = true; }
+                    if (ImGui.SliderInt("Radial Segs", ref radSeg, 3, 64)) { p = p with { RadialSegments = radSeg }; changed = true; }
+                    if (ImGui.SliderInt("Height Segs", ref hSeg, 1, 16)) { p = p with { HeightSegments = hSeg }; changed = true; }
+                    if (ImGui.Checkbox("Cap Top", ref capTop)) { p = p with { CapTop = capTop }; changed = true; }
+                    ImGui.SameLine();
+                    if (ImGui.Checkbox("Cap Bottom", ref capBottom)) { p = p with { CapBottom = capBottom }; changed = true; }
+
+                    if (changed) PrimitiveController.CylinderParams = p;
+                    break;
+                }
+
+                case PrimitiveType.Cone:
+                {
+                    ConeParams p = PrimitiveController.ConeParams;
+                    float radius = p.Radius;
+                    float height = p.Height;
+                    int radSeg = p.RadialSegments;
+                    bool capBottom = p.CapBottom;
+
+                    if (ImGui.DragFloat("Radius", ref radius, 0.05f, 0.1f, 50.0f)) { p = p with { Radius = radius }; changed = true; }
+                    if (ImGui.DragFloat("Height", ref height, 0.1f, 0.1f, 100.0f)) { p = p with { Height = height }; changed = true; }
+                    if (ImGui.SliderInt("Radial Segs", ref radSeg, 3, 64)) { p = p with { RadialSegments = radSeg }; changed = true; }
+                    if (ImGui.Checkbox("Cap Bottom", ref capBottom)) { p = p with { CapBottom = capBottom }; changed = true; }
+
+                    if (changed) PrimitiveController.ConeParams = p;
+                    break;
+                }
+
+                case PrimitiveType.Icosahedron:
+                {
+                    IcosahedronParams p = PrimitiveController.IcosahedronParams;
+                    float radius = p.Radius;
+
+                    if (ImGui.DragFloat("Radius", ref radius, 0.05f, 0.1f, 50.0f)) { p = p with { Radius = radius }; changed = true; }
+
+                    if (changed) PrimitiveController.IcosahedronParams = p;
+                    break;
+                }
+
+                case PrimitiveType.Geosphere:
+                {
+                    GeosphereParams p = PrimitiveController.GeosphereParams;
+                    float radius = p.Radius;
+                    int subs = p.Subdivisions;
+
+                    if (ImGui.DragFloat("Radius", ref radius, 0.05f, 0.1f, 50.0f)) { p = p with { Radius = radius }; changed = true; }
+                    if (ImGui.SliderInt("Subdivisions", ref subs, 0, 4)) { p = p with { Subdivisions = subs }; changed = true; }
+
+                    if (changed) PrimitiveController.GeosphereParams = p;
+                    break;
+                }
+            }
+
+            if (changed)
+            {
+                PrimitiveController.RegenerateActiveMesh();
+            }
+
+            ImGui.Separator();
+            if (ImGui.Button("Done", new Vector2(-1.0f, 0.0f)))
+            {
+                open = false;
+            }
+
+            ImGui.End();
+        }
+
+        ImGui.PopStyleVar(2);
+        ImGui.PopStyleColor();
+
+        if (!open)
+        {
+            PrimitiveController.Dismiss();
+        }
     }
 
     private void UpdateViewportCameraInput(float dt, Vector2 viewportSize)
@@ -501,7 +749,16 @@ public sealed class EditorApp : IDisposable
             SceneObject obj = Scene.Objects[i];
             int vertCount = obj.Mesh?.VertexCount ?? 0;
             int faceCount = obj.Mesh?.FaceCount ?? 0;
-            ImGui.BulletText($"{obj.Name} (V:{vertCount}, F:{faceCount})");
+            bool isActiveCreation = PrimitiveController.ActiveObject?.Id == obj.Id;
+            if (isActiveCreation)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1.0f, 0.85f, 0.3f, 1.0f));
+            }
+            ImGui.BulletText($"{obj.Name} (V:{vertCount}, F:{faceCount}){(isActiveCreation ? " [Active]" : "")}");
+            if (isActiveCreation)
+            {
+                ImGui.PopStyleColor();
+            }
         }
 
         ImGui.End();
@@ -530,7 +787,7 @@ public sealed class EditorApp : IDisposable
         ImGui.PopStyleVar(2);
 
         Vector3 camPos = Camera.Position;
-        ImGui.Text($"{_statusMessage}  |  Cam (+X Right, +Y Up, +Z Away): ({camPos.X:0.0}, {camPos.Y:0.0}, {camPos.Z:0.0})  |  View: {Camera.ProjectionMode}  |  FPS: {Raylib.GetFPS()}");
+        ImGui.Text($"{_statusMessage}  |  Cam: ({camPos.X:0.0}, {camPos.Y:0.0}, {camPos.Z:0.0})  |  View: {Camera.ProjectionMode}  |  Objects: {Scene.ObjectCount}  |  FPS: {Raylib.GetFPS()}");
 
         ImGui.End();
     }
