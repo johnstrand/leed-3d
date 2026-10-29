@@ -3,6 +3,7 @@ using ImGuiNET;
 using Leed3D.Editor.UI;
 using Leed3D.Editor.Viewport;
 using Leed3D.Kernel.Geometry;
+using Leed3D.Kernel.Gizmos;
 using Leed3D.Kernel.Math;
 using Leed3D.Kernel.Primitives;
 using Leed3D.Kernel.Scene;
@@ -29,6 +30,8 @@ public sealed class EditorApp : IDisposable
     public EditorCamera Camera { get; } = new();
     public PrimitiveCreationController PrimitiveController { get; }
     public SelectionManager Selection { get; } = new();
+    public TransformGizmo3D Gizmo { get; } = new();
+    public TransformApplicator Applicator { get; } = new();
 
     public ViewportShadingMode ShadingMode { get; set; } = ViewportShadingMode.SolidWithWireframe;
     public bool SnapToGridEnabled { get; set; } = true;
@@ -82,7 +85,7 @@ public sealed class EditorApp : IDisposable
             HandleGlobalShortcuts();
 
             // Render 3D scene into offscreen RenderTexture2D before drawing ImGui
-            _viewportRenderer.RenderScene(Scene, Camera, ShadingMode, CurrentGridStep, Selection);
+            _viewportRenderer.RenderScene(Scene, Camera, ShadingMode, CurrentGridStep, Selection, Gizmo);
 
             Raylib.BeginDrawing();
             Raylib.ClearBackground(new Color(20, 22, 25, 255));
@@ -108,6 +111,33 @@ public sealed class EditorApp : IDisposable
         bool alt = Raylib.IsKeyDown(KeyboardKey.LeftAlt) || Raylib.IsKeyDown(KeyboardKey.RightAlt);
         bool flying = Raylib.IsMouseButtonDown(MouseButton.Right);
 
+        // Active Gizmo Drag Shortcuts: Esc/RightClick cancel, X/Y/Z or Shift+X/Y/Z constraint override
+        if (Gizmo.IsDragging)
+        {
+            if (Raylib.IsKeyPressed(KeyboardKey.Escape) || Raylib.IsMouseButtonPressed(MouseButton.Right))
+            {
+                Gizmo.CancelDrag();
+                Applicator.CancelSession(Scene, UndoStack);
+                _statusMessage = "Cancelled gizmo transform.";
+                return;
+            }
+
+            if (Raylib.IsKeyPressed(KeyboardKey.X))
+            {
+                Gizmo.SetConstraintOverride(shift ? GizmoAxisConstraint.YZ : GizmoAxisConstraint.X);
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.Y))
+            {
+                Gizmo.SetConstraintOverride(shift ? GizmoAxisConstraint.XZ : GizmoAxisConstraint.Y);
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.Z))
+            {
+                Gizmo.SetConstraintOverride(shift ? GizmoAxisConstraint.XY : GizmoAxisConstraint.Z);
+            }
+
+            return;
+        }
+
         // Undo (Ctrl+Z) & Redo (Ctrl+Y or Ctrl+Shift+Z)
         if (ctrl && !shift && Raylib.IsKeyPressed(KeyboardKey.Z))
         {
@@ -127,7 +157,7 @@ public sealed class EditorApp : IDisposable
             }
         }
 
-        // Selection & Mode Shortcuts (when not in free-fly WASD mode)
+        // Selection, Mode & Gizmo Tool Shortcuts (when not in free-fly WASD mode)
         if (!flying)
         {
             if (Raylib.IsKeyPressed(KeyboardKey.Tab))
@@ -149,6 +179,21 @@ public sealed class EditorApp : IDisposable
             {
                 Selection.SetMode(InteractionMode.Face, Scene);
                 _statusMessage = "Face Select Mode (3).";
+            }
+            else if (!ctrl && !alt && !shift && Raylib.IsKeyPressed(KeyboardKey.W))
+            {
+                Gizmo.ToolMode = GizmoToolMode.Translate;
+                _statusMessage = "Gizmo Tool: Translate (W).";
+            }
+            else if (!ctrl && !alt && !shift && Selection.Mode == InteractionMode.Object && Raylib.IsKeyPressed(KeyboardKey.E))
+            {
+                Gizmo.ToolMode = GizmoToolMode.Rotate;
+                _statusMessage = "Gizmo Tool: Rotate (E).";
+            }
+            else if (!ctrl && !alt && !shift && Raylib.IsKeyPressed(KeyboardKey.R))
+            {
+                Gizmo.ToolMode = GizmoToolMode.Scale;
+                _statusMessage = "Gizmo Tool: Scale (R).";
             }
             else if (ctrl && Raylib.IsKeyPressed(KeyboardKey.I))
             {
@@ -552,7 +597,30 @@ public sealed class EditorApp : IDisposable
 
     private void DrawPrimitiveToolbar()
     {
-        ImGui.TextDisabled("Add Primitive:");
+        ImGui.TextDisabled("Gizmo:");
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Move (W)", Gizmo.ToolMode == GizmoToolMode.Translate))
+        {
+            Gizmo.ToolMode = GizmoToolMode.Translate;
+        }
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Rotate (E)", Gizmo.ToolMode == GizmoToolMode.Rotate))
+        {
+            Gizmo.ToolMode = GizmoToolMode.Rotate;
+        }
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Scale (R)", Gizmo.ToolMode == GizmoToolMode.Scale))
+        {
+            Gizmo.ToolMode = GizmoToolMode.Scale;
+        }
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Universal", Gizmo.ToolMode == GizmoToolMode.Universal))
+        {
+            Gizmo.ToolMode = GizmoToolMode.Universal;
+        }
+
+        ImGui.SameLine();
+        ImGui.TextDisabled("| Add Primitive:");
         ImGui.SameLine();
 
         if (ImGui.Button("Plane")) SpawnPrimitive(PrimitiveType.Plane);
@@ -774,11 +842,53 @@ public sealed class EditorApp : IDisposable
 
     private void UpdateViewportSelectionInput(Vector2 viewportSize)
     {
+        // Active Gizmo Drag Handling
+        if (Gizmo.IsDragging)
+        {
+            if (Raylib.IsMouseButtonPressed(MouseButton.Right) || Raylib.IsKeyPressed(KeyboardKey.Escape))
+            {
+                Gizmo.CancelDrag();
+                Applicator.CancelSession(Scene, UndoStack);
+                _statusMessage = "Cancelled gizmo transform.";
+                return;
+            }
+
+            if (Raylib.IsMouseButtonDown(MouseButton.Left))
+            {
+                Ray3D dragRay = Camera.ScreenPointToRay(_viewportLocalMousePos, viewportSize);
+                bool ctrlHeld = Raylib.IsKeyDown(KeyboardKey.LeftControl) || Raylib.IsKeyDown(KeyboardKey.RightControl);
+                bool snapGrid = ctrlHeld ? !SnapToGridEnabled : SnapToGridEnabled;
+                bool snapAngle = ctrlHeld ? !SnapAngleEnabled : SnapAngleEnabled;
+
+                Gizmo.UpdateDrag(dragRay, snapGrid, CurrentGridStep, snapAngle, CurrentAngleStepDegrees);
+                Applicator.ApplyGizmo(Scene, Gizmo);
+
+                _statusMessage = Gizmo.ActiveDragMode switch
+                {
+                    GizmoToolMode.Translate => $"Translate ({Gizmo.ActiveConstraint}): ({Gizmo.CurrentTranslationDelta.X:+0.00;-0.00;0.00}, {Gizmo.CurrentTranslationDelta.Y:+0.00;-0.00;0.00}, {Gizmo.CurrentTranslationDelta.Z:+0.00;-0.00;0.00})",
+                    GizmoToolMode.Rotate => $"Rotate ({Gizmo.ActiveConstraint}): {Gizmo.CurrentAngleDegrees:+0.0;-0.0;0.0}°",
+                    GizmoToolMode.Scale => $"Scale ({Gizmo.ActiveConstraint}): ({Gizmo.CurrentScaleMultiplier.X:0.00}, {Gizmo.CurrentScaleMultiplier.Y:0.00}, {Gizmo.CurrentScaleMultiplier.Z:0.00})",
+                    _ => "Transforming..."
+                };
+                return;
+            }
+
+            if (Raylib.IsMouseButtonReleased(MouseButton.Left))
+            {
+                Gizmo.EndDrag();
+                Applicator.CommitSession(Scene, UndoStack);
+                PrimitiveController.Dismiss();
+                _statusMessage = "Committed gizmo transform.";
+                return;
+            }
+        }
+
         // Don't interfere if right or middle mouse buttons are used for camera navigation
         if (Raylib.IsMouseButtonDown(MouseButton.Right) || Raylib.IsMouseButtonDown(MouseButton.Middle))
         {
             _isMouseDownInViewport = false;
             _isDraggingMarquee = false;
+            Gizmo.HoveredConstraint = GizmoAxisConstraint.None;
             return;
         }
 
@@ -798,11 +908,39 @@ public sealed class EditorApp : IDisposable
             }
         }
 
+        // Update Gizmo Hover State when not dragging marquee
+        Vector3? activePivot = Selection.GetSelectionPivotWorld(Scene);
+        if (_isViewportHovered && !overAdjustOverlay && !_isDraggingMarquee && activePivot.HasValue)
+        {
+            Ray3D hoverRay = Camera.ScreenPointToRay(_viewportLocalMousePos, viewportSize);
+            float gizmoScale = TransformGizmo3D.ComputeGizmoScale(Camera, activePivot.Value);
+            Gizmo.HoveredConstraint = Gizmo.HitTest(hoverRay, activePivot.Value, gizmoScale, Gizmo.ToolMode);
+        }
+        else if (!_isMouseDownInViewport)
+        {
+            Gizmo.HoveredConstraint = GizmoAxisConstraint.None;
+        }
+
         // 1. Mouse Down
         if (_isViewportHovered && !overAdjustOverlay && Raylib.IsMouseButtonPressed(MouseButton.Left))
         {
             if (!ImGui.IsAnyItemActive())
             {
+                // If hovering a 3D Gizmo handle, start gizmo drag instead of selection/marquee
+                if (Gizmo.HoveredConstraint != GizmoAxisConstraint.None && activePivot.HasValue)
+                {
+                    Ray3D startRay = Camera.ScreenPointToRay(_viewportLocalMousePos, viewportSize);
+                    Gizmo.BeginDrag(Gizmo.ToolMode, Gizmo.HoveredConstraint, activePivot.Value, startRay, Camera.GetForward());
+                    Applicator.BeginSession(
+                        Scene,
+                        Selection,
+                        activePivot.Value,
+                        UndoStack,
+                        $"{Gizmo.ActiveDragMode} ({Gizmo.ActiveConstraint})");
+                    PrimitiveController.Dismiss();
+                    return;
+                }
+
                 _isMouseDownInViewport = true;
                 _mouseDownLocalPos = _viewportLocalMousePos;
                 _mouseDownScreenPos = mouseScreen;

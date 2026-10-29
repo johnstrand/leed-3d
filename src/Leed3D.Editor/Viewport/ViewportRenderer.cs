@@ -1,5 +1,6 @@
 using System.Numerics;
 using Leed3D.Kernel.Geometry;
+using Leed3D.Kernel.Gizmos;
 using Leed3D.Kernel.Math;
 using Leed3D.Kernel.Scene;
 using Leed3D.Kernel.Selection;
@@ -62,7 +63,8 @@ public sealed class ViewportRenderer : IDisposable
         EditorCamera camera,
         ViewportShadingMode shadingMode,
         float gridStep,
-        SelectionManager? selection = null)
+        SelectionManager? selection = null,
+        TransformGizmo3D? gizmo = null)
     {
         if (_renderTarget.Id == 0)
         {
@@ -97,6 +99,29 @@ public sealed class ViewportRenderer : IDisposable
             }
 
             DrawMeshObject(obj, shadingMode, selection);
+        }
+
+        // Render 3D Transform Gizmo on top of scene geometry when selection has a valid pivot
+        if (selection is not null && gizmo is not null)
+        {
+            Vector3? pivotOpt = gizmo.IsDragging
+                ? (gizmo.ActiveDragMode == GizmoToolMode.Translate ? gizmo.DragPivotWorld + gizmo.CurrentTranslationDelta : gizmo.DragPivotWorld)
+                : selection.GetSelectionPivotWorld(scene);
+
+            if (pivotOpt.HasValue)
+            {
+                Vector3 pivot = pivotOpt.Value;
+                float gizmoScale = TransformGizmo3D.ComputeGizmoScale(camera, pivot);
+
+                Rlgl.DrawRenderBatchActive();
+                Rlgl.DisableDepthTest();
+                Rlgl.DisableBackfaceCulling();
+
+                DrawTransformGizmo(gizmo, pivot, gizmoScale);
+
+                Rlgl.DrawRenderBatchActive();
+                Rlgl.EnableDepthTest();
+            }
         }
 
         Rlgl.DrawRenderBatchActive();
@@ -381,6 +406,259 @@ public sealed class ViewportRenderer : IDisposable
             (byte)System.Math.Clamp((int)(lit.Y * 255.0f), 0, 255),
             (byte)System.Math.Clamp((int)(lit.Z * 255.0f), 0, 255),
             (byte)255);
+    }
+
+    private static void DrawTransformGizmo(TransformGizmo3D gizmo, Vector3 pivot, float scale)
+    {
+        Color hoverYellow = new(255, 230, 50, 255);
+        GizmoAxisConstraint highlighted = gizmo.IsDragging ? gizmo.ActiveConstraint : gizmo.HoveredConstraint;
+
+        // 1. Active infinite axis guide lines during drag
+        if (gizmo.IsDragging)
+        {
+            const float guideExtent = 512.0f;
+            Vector3 guideOrigin = gizmo.DragPivotWorld;
+
+            Rlgl.Begin(DrawMode.Lines);
+            if (gizmo.ActiveConstraint is GizmoAxisConstraint.X or GizmoAxisConstraint.XY or GizmoAxisConstraint.XZ)
+            {
+                EmitLineEditorSpace(guideOrigin - (Vector3.UnitX * guideExtent), guideOrigin + (Vector3.UnitX * guideExtent), AxisXColor);
+            }
+            if (gizmo.ActiveConstraint is GizmoAxisConstraint.Y or GizmoAxisConstraint.XY or GizmoAxisConstraint.YZ)
+            {
+                EmitLineEditorSpace(guideOrigin - (Vector3.UnitY * guideExtent), guideOrigin + (Vector3.UnitY * guideExtent), AxisYColor);
+            }
+            if (gizmo.ActiveConstraint is GizmoAxisConstraint.Z or GizmoAxisConstraint.XZ or GizmoAxisConstraint.YZ)
+            {
+                EmitLineEditorSpace(guideOrigin - (Vector3.UnitZ * guideExtent), guideOrigin + (Vector3.UnitZ * guideExtent), AxisZColor);
+            }
+            Rlgl.End();
+        }
+
+        Color colX = highlighted is GizmoAxisConstraint.X or GizmoAxisConstraint.XY or GizmoAxisConstraint.XZ ? hoverYellow : AxisXColor;
+        Color colY = highlighted is GizmoAxisConstraint.Y or GizmoAxisConstraint.XY or GizmoAxisConstraint.YZ ? hoverYellow : AxisYColor;
+        Color colZ = highlighted is GizmoAxisConstraint.Z or GizmoAxisConstraint.XZ or GizmoAxisConstraint.YZ ? hoverYellow : AxisZColor;
+        Color colUniform = highlighted == GizmoAxisConstraint.Uniform ? hoverYellow : new Color(235, 235, 240, 255);
+
+        GizmoToolMode mode = gizmo.ToolMode;
+
+        // 2. Dual-Axis Plane Quads (XY, XZ, YZ)
+        if (mode is GizmoToolMode.Translate or GizmoToolMode.Scale or GizmoToolMode.Universal)
+        {
+            float qMin = scale * TransformGizmo3D.PlaneQuadOffsetFactor;
+            float qMax = scale * (TransformGizmo3D.PlaneQuadOffsetFactor + TransformGizmo3D.PlaneQuadSizeFactor);
+
+            // XY quad (locks Z -> Blue)
+            Color xyCol = highlighted == GizmoAxisConstraint.XY ? hoverYellow : AxisZColor;
+            DrawPlaneQuadHandle(
+                pivot + new Vector3(qMin, qMin, 0.0f),
+                pivot + new Vector3(qMax, qMin, 0.0f),
+                pivot + new Vector3(qMax, qMax, 0.0f),
+                pivot + new Vector3(qMin, qMax, 0.0f),
+                xyCol);
+
+            // XZ quad (locks Y -> Green)
+            Color xzCol = highlighted == GizmoAxisConstraint.XZ ? hoverYellow : AxisYColor;
+            DrawPlaneQuadHandle(
+                pivot + new Vector3(qMin, 0.0f, qMin),
+                pivot + new Vector3(qMax, 0.0f, qMin),
+                pivot + new Vector3(qMax, 0.0f, qMax),
+                pivot + new Vector3(qMin, 0.0f, qMax),
+                xzCol);
+
+            // YZ quad (locks X -> Red)
+            Color yzCol = highlighted == GizmoAxisConstraint.YZ ? hoverYellow : AxisXColor;
+            DrawPlaneQuadHandle(
+                pivot + new Vector3(0.0f, qMin, qMin),
+                pivot + new Vector3(0.0f, qMax, qMin),
+                pivot + new Vector3(0.0f, qMax, qMax),
+                pivot + new Vector3(0.0f, qMin, qMax),
+                yzCol);
+        }
+
+        // 3. Translate Arrows & Shafts
+        if (mode is GizmoToolMode.Translate or GizmoToolMode.Universal)
+        {
+            float shaftStart = scale * 0.08f;
+            float shaftEnd = scale * 0.82f;
+            float tipEnd = scale * TransformGizmo3D.AxisEndFactor;
+            float tipRadius = scale * 0.055f;
+
+            Rlgl.Begin(DrawMode.Lines);
+            EmitLineEditorSpace(pivot + (Vector3.UnitX * shaftStart), pivot + (Vector3.UnitX * shaftEnd), colX);
+            EmitLineEditorSpace(pivot + (Vector3.UnitY * shaftStart), pivot + (Vector3.UnitY * shaftEnd), colY);
+            EmitLineEditorSpace(pivot + (Vector3.UnitZ * shaftStart), pivot + (Vector3.UnitZ * shaftEnd), colZ);
+            Rlgl.End();
+
+            DrawArrowTip3D(pivot + (Vector3.UnitX * shaftEnd), pivot + (Vector3.UnitX * tipEnd), Vector3.UnitY, Vector3.UnitZ, tipRadius, colX);
+            DrawArrowTip3D(pivot + (Vector3.UnitY * shaftEnd), pivot + (Vector3.UnitY * tipEnd), Vector3.UnitZ, Vector3.UnitX, tipRadius, colY);
+            DrawArrowTip3D(pivot + (Vector3.UnitZ * shaftEnd), pivot + (Vector3.UnitZ * tipEnd), Vector3.UnitX, Vector3.UnitY, tipRadius, colZ);
+        }
+
+        // 4. Scale Stems & Cubes
+        if (mode == GizmoToolMode.Scale)
+        {
+            float shaftStart = scale * 0.08f;
+            float shaftEnd = scale * 0.90f;
+            float cubeHalf = scale * 0.055f;
+
+            Rlgl.Begin(DrawMode.Lines);
+            EmitLineEditorSpace(pivot + (Vector3.UnitX * shaftStart), pivot + (Vector3.UnitX * shaftEnd), colX);
+            EmitLineEditorSpace(pivot + (Vector3.UnitY * shaftStart), pivot + (Vector3.UnitY * shaftEnd), colY);
+            EmitLineEditorSpace(pivot + (Vector3.UnitZ * shaftStart), pivot + (Vector3.UnitZ * shaftEnd), colZ);
+            Rlgl.End();
+
+            DrawCubeHandle3D(pivot + (Vector3.UnitX * (shaftEnd + cubeHalf)), cubeHalf, colX);
+            DrawCubeHandle3D(pivot + (Vector3.UnitY * (shaftEnd + cubeHalf)), cubeHalf, colY);
+            DrawCubeHandle3D(pivot + (Vector3.UnitZ * (shaftEnd + cubeHalf)), cubeHalf, colZ);
+        }
+
+        // 5. Rotation Rings
+        if (mode is GizmoToolMode.Rotate or GizmoToolMode.Universal)
+        {
+            float ringRadius = scale * TransformGizmo3D.RotateRingRadiusFactor;
+            Color ringX = highlighted == GizmoAxisConstraint.X ? hoverYellow : AxisXColor;
+            Color ringY = highlighted == GizmoAxisConstraint.Y ? hoverYellow : AxisYColor;
+            Color ringZ = highlighted == GizmoAxisConstraint.Z ? hoverYellow : AxisZColor;
+
+            DrawRotationRing3D(pivot, Vector3.UnitY, Vector3.UnitZ, ringRadius, ringX);
+            DrawRotationRing3D(pivot, Vector3.UnitZ, Vector3.UnitX, ringRadius, ringY);
+            DrawRotationRing3D(pivot, Vector3.UnitX, Vector3.UnitY, ringRadius, ringZ);
+        }
+
+        // 6. Center Uniform Box
+        DrawCubeHandle3D(pivot, scale * 0.06f, colUniform);
+    }
+
+    private static void DrawPlaneQuadHandle(Vector3 c0, Vector3 c1, Vector3 c2, Vector3 c3, Color borderCol)
+    {
+        Color fillCol = new(borderCol.R, borderCol.G, borderCol.B, (byte)95);
+
+        Vector3 r0 = CoordSpace.ToRightHanded(c0);
+        Vector3 r1 = CoordSpace.ToRightHanded(c1);
+        Vector3 r2 = CoordSpace.ToRightHanded(c2);
+        Vector3 r3 = CoordSpace.ToRightHanded(c3);
+
+        Rlgl.Begin(DrawMode.Triangles);
+        Rlgl.Color4ub(fillCol.R, fillCol.G, fillCol.B, fillCol.A);
+        Rlgl.Vertex3f(r0.X, r0.Y, r0.Z);
+        Rlgl.Vertex3f(r1.X, r1.Y, r1.Z);
+        Rlgl.Vertex3f(r2.X, r2.Y, r2.Z);
+
+        Rlgl.Vertex3f(r0.X, r0.Y, r0.Z);
+        Rlgl.Vertex3f(r2.X, r2.Y, r2.Z);
+        Rlgl.Vertex3f(r3.X, r3.Y, r3.Z);
+        Rlgl.End();
+
+        Rlgl.Begin(DrawMode.Lines);
+        EmitLineEditorSpace(c0, c1, borderCol);
+        EmitLineEditorSpace(c1, c2, borderCol);
+        EmitLineEditorSpace(c2, c3, borderCol);
+        EmitLineEditorSpace(c3, c0, borderCol);
+        Rlgl.End();
+    }
+
+    private static void DrawArrowTip3D(
+        Vector3 baseCenter,
+        Vector3 tipPoint,
+        Vector3 tangentA,
+        Vector3 tangentB,
+        float radius,
+        Color color)
+    {
+        const int segments = 8;
+        Vector3 tipRh = CoordSpace.ToRightHanded(tipPoint);
+        Vector3 baseRh = CoordSpace.ToRightHanded(baseCenter);
+
+        Rlgl.Begin(DrawMode.Triangles);
+        Rlgl.Color4ub(color.R, color.G, color.B, color.A);
+
+        for (int i = 0; i < segments; i++)
+        {
+            float a0 = (i / (float)segments) * MathF.Tau;
+            float a1 = ((i + 1) / (float)segments) * MathF.Tau;
+
+            Vector3 p0 = baseCenter + ((tangentA * MathF.Cos(a0)) + (tangentB * MathF.Sin(a0))) * radius;
+            Vector3 p1 = baseCenter + ((tangentA * MathF.Cos(a1)) + (tangentB * MathF.Sin(a1))) * radius;
+
+            Vector3 p0Rh = CoordSpace.ToRightHanded(p0);
+            Vector3 p1Rh = CoordSpace.ToRightHanded(p1);
+
+            // Side cone triangle
+            Rlgl.Vertex3f(tipRh.X, tipRh.Y, tipRh.Z);
+            Rlgl.Vertex3f(p0Rh.X, p0Rh.Y, p0Rh.Z);
+            Rlgl.Vertex3f(p1Rh.X, p1Rh.Y, p1Rh.Z);
+
+            // Base cap triangle
+            Rlgl.Vertex3f(baseRh.X, baseRh.Y, baseRh.Z);
+            Rlgl.Vertex3f(p1Rh.X, p1Rh.Y, p1Rh.Z);
+            Rlgl.Vertex3f(p0Rh.X, p0Rh.Y, p0Rh.Z);
+        }
+
+        Rlgl.End();
+    }
+
+    private static void DrawCubeHandle3D(Vector3 center, float halfExtent, Color color)
+    {
+        Vector3 min = center - new Vector3(halfExtent);
+        Vector3 max = center + new Vector3(halfExtent);
+
+        Span<Vector3> v =
+        [
+            CoordSpace.ToRightHanded(new Vector3(min.X, min.Y, min.Z)),
+            CoordSpace.ToRightHanded(new Vector3(max.X, min.Y, min.Z)),
+            CoordSpace.ToRightHanded(new Vector3(max.X, max.Y, min.Z)),
+            CoordSpace.ToRightHanded(new Vector3(min.X, max.Y, min.Z)),
+            CoordSpace.ToRightHanded(new Vector3(min.X, min.Y, max.Z)),
+            CoordSpace.ToRightHanded(new Vector3(max.X, min.Y, max.Z)),
+            CoordSpace.ToRightHanded(new Vector3(max.X, max.Y, max.Z)),
+            CoordSpace.ToRightHanded(new Vector3(min.X, max.Y, max.Z))
+        ];
+
+        ReadOnlySpan<int> indices =
+        [
+            0, 1, 2, 0, 2, 3,
+            4, 6, 5, 4, 7, 6,
+            0, 4, 5, 0, 5, 1,
+            3, 2, 6, 3, 6, 7,
+            1, 5, 6, 1, 6, 2,
+            0, 3, 7, 0, 7, 4
+        ];
+
+        Rlgl.Begin(DrawMode.Triangles);
+        Rlgl.Color4ub(color.R, color.G, color.B, color.A);
+
+        for (int i = 0; i < indices.Length; i++)
+        {
+            Vector3 pt = v[indices[i]];
+            Rlgl.Vertex3f(pt.X, pt.Y, pt.Z);
+        }
+
+        Rlgl.End();
+    }
+
+    private static void DrawRotationRing3D(
+        Vector3 center,
+        Vector3 tangentA,
+        Vector3 tangentB,
+        float radius,
+        Color color)
+    {
+        const int segments = 64;
+        Rlgl.Begin(DrawMode.Lines);
+
+        for (int i = 0; i < segments; i++)
+        {
+            float a0 = (i / (float)segments) * MathF.Tau;
+            float a1 = ((i + 1) / (float)segments) * MathF.Tau;
+
+            Vector3 p0 = center + ((tangentA * MathF.Cos(a0)) + (tangentB * MathF.Sin(a0))) * radius;
+            Vector3 p1 = center + ((tangentA * MathF.Cos(a1)) + (tangentB * MathF.Sin(a1))) * radius;
+
+            EmitLineEditorSpace(p0, p1, color);
+        }
+
+        Rlgl.End();
     }
 
     private static void EmitLineEditorSpace(Vector3 startEditor, Vector3 endEditor, Color color)
