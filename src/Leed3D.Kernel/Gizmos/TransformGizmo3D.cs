@@ -177,12 +177,12 @@ public sealed class TransformGizmo3D
     /// </summary>
     public void SetConstraintOverride(GizmoAxisConstraint newConstraint)
     {
-        if (!IsDragging || newConstraint == GizmoAxisConstraint.None)
+        if (!IsDragging)
         {
             return;
         }
 
-        ActiveConstraint = newConstraint;
+        ActiveConstraint = ActiveConstraint == newConstraint ? GizmoAxisConstraint.None : newConstraint;
         ResetCurrentDeltas();
     }
 

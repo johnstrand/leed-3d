@@ -32,6 +32,7 @@ public sealed class EditorApp : IDisposable
     public SelectionManager Selection { get; } = new();
     public TransformGizmo3D Gizmo { get; } = new();
     public TransformApplicator Applicator { get; } = new();
+    public ModalTransformController ModalController { get; } = new();
 
     public ViewportShadingMode ShadingMode { get; set; } = ViewportShadingMode.SolidWithWireframe;
     public bool SnapToGridEnabled { get; set; } = true;
@@ -85,7 +86,7 @@ public sealed class EditorApp : IDisposable
             HandleGlobalShortcuts();
 
             // Render 3D scene into offscreen RenderTexture2D before drawing ImGui
-            _viewportRenderer.RenderScene(Scene, Camera, ShadingMode, CurrentGridStep, Selection, Gizmo);
+            _viewportRenderer.RenderScene(Scene, Camera, ShadingMode, CurrentGridStep, Selection, Gizmo, ModalController);
 
             Raylib.BeginDrawing();
             Raylib.ClearBackground(new Color(20, 22, 25, 255));
@@ -110,6 +111,42 @@ public sealed class EditorApp : IDisposable
         bool shift = Raylib.IsKeyDown(KeyboardKey.LeftShift) || Raylib.IsKeyDown(KeyboardKey.RightShift);
         bool alt = Raylib.IsKeyDown(KeyboardKey.LeftAlt) || Raylib.IsKeyDown(KeyboardKey.RightAlt);
         bool flying = Raylib.IsMouseButtonDown(MouseButton.Right);
+
+        // Active Modal Transform Operator Shortcuts: Cancel (Esc/RMB), Confirm (Enter/LMB), Axis Locks (X/Y/Z, Shift+X/Y/Z), Numeric Input
+        if (ModalController.IsActive)
+        {
+            if (Raylib.IsKeyPressed(KeyboardKey.Escape) || Raylib.IsMouseButtonPressed(MouseButton.Right))
+            {
+                ModalController.Cancel(Scene, UndoStack);
+                _statusMessage = "Cancelled modal transform.";
+                return;
+            }
+
+            if (Raylib.IsKeyPressed(KeyboardKey.Enter) || Raylib.IsKeyPressed(KeyboardKey.KpEnter) || Raylib.IsMouseButtonPressed(MouseButton.Left))
+            {
+                ModalController.Confirm(Scene, UndoStack);
+                PrimitiveController.Dismiss();
+                _statusMessage = "Committed modal transform.";
+                return;
+            }
+
+            if (Raylib.IsKeyPressed(KeyboardKey.X))
+            {
+                ModalController.HandleAxisKey('X', shift, Scene);
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.Y))
+            {
+                ModalController.HandleAxisKey('Y', shift, Scene);
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.Z))
+            {
+                ModalController.HandleAxisKey('Z', shift, Scene);
+            }
+
+            HandleModalNumericInput();
+            _statusMessage = ModalController.GetStatusReadout();
+            return;
+        }
 
         // Active Gizmo Drag Shortcuts: Esc/RightClick cancel, X/Y/Z or Shift+X/Y/Z constraint override
         if (Gizmo.IsDragging)
@@ -157,9 +194,44 @@ public sealed class EditorApp : IDisposable
             }
         }
 
-        // Selection, Mode & Gizmo Tool Shortcuts (when not in free-fly WASD mode)
+        // Selection, Mode, Modal Operators & Gizmo Tool Shortcuts (when not in free-fly WASD mode)
         if (!flying)
         {
+            // Blender-style modal transform operators (G Grab/Move, R Rotate, S Scale)
+            if (!ctrl && !alt && Selection.HasSelection)
+            {
+                if (Raylib.IsKeyPressed(KeyboardKey.G))
+                {
+                    Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, _viewportRenderer.ViewportSize);
+                    if (ModalController.Start(ModalTransformMode.Move, Scene, Selection, ray, Camera.GetForward(), UndoStack))
+                    {
+                        PrimitiveController.Dismiss();
+                        _statusMessage = ModalController.GetStatusReadout();
+                        return;
+                    }
+                }
+                else if (Raylib.IsKeyPressed(KeyboardKey.R))
+                {
+                    Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, _viewportRenderer.ViewportSize);
+                    if (ModalController.Start(ModalTransformMode.Rotate, Scene, Selection, ray, Camera.GetForward(), UndoStack))
+                    {
+                        PrimitiveController.Dismiss();
+                        _statusMessage = ModalController.GetStatusReadout();
+                        return;
+                    }
+                }
+                else if (Raylib.IsKeyPressed(KeyboardKey.S))
+                {
+                    Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, _viewportRenderer.ViewportSize);
+                    if (ModalController.Start(ModalTransformMode.Scale, Scene, Selection, ray, Camera.GetForward(), UndoStack))
+                    {
+                        PrimitiveController.Dismiss();
+                        _statusMessage = ModalController.GetStatusReadout();
+                        return;
+                    }
+                }
+            }
+
             if (Raylib.IsKeyPressed(KeyboardKey.Tab))
             {
                 Selection.ToggleObjectEditMode(Scene);
@@ -190,7 +262,7 @@ public sealed class EditorApp : IDisposable
                 Gizmo.ToolMode = GizmoToolMode.Rotate;
                 _statusMessage = "Gizmo Tool: Rotate (E).";
             }
-            else if (!ctrl && !alt && !shift && Raylib.IsKeyPressed(KeyboardKey.R))
+            else if (!ctrl && !alt && !shift && !Selection.HasSelection && Raylib.IsKeyPressed(KeyboardKey.R))
             {
                 Gizmo.ToolMode = GizmoToolMode.Scale;
                 _statusMessage = "Gizmo Tool: Scale (R).";
@@ -209,6 +281,38 @@ public sealed class EditorApp : IDisposable
             {
                 Selection.SelectAll(Scene);
                 _statusMessage = $"Selected all ({Selection.Mode} mode).";
+            }
+        }
+    }
+
+    private void HandleModalNumericInput()
+    {
+        if (Raylib.IsKeyPressed(KeyboardKey.Backspace))
+        {
+            ModalController.HandleBackspace(Scene);
+            return;
+        }
+
+        if (Raylib.IsKeyPressed(KeyboardKey.Minus) || Raylib.IsKeyPressed(KeyboardKey.KpSubtract))
+        {
+            ModalController.HandleNumericKey('-', Scene);
+            return;
+        }
+
+        if (Raylib.IsKeyPressed(KeyboardKey.Period) || Raylib.IsKeyPressed(KeyboardKey.KpDecimal))
+        {
+            ModalController.HandleNumericKey('.', Scene);
+            return;
+        }
+
+        for (int i = 0; i <= 9; i++)
+        {
+            KeyboardKey mainKey = (KeyboardKey)((int)KeyboardKey.Zero + i);
+            KeyboardKey kpKey = (KeyboardKey)((int)KeyboardKey.Kp0 + i);
+            if (Raylib.IsKeyPressed(mainKey) || Raylib.IsKeyPressed(kpKey))
+            {
+                ModalController.HandleNumericKey((char)('0' + i), Scene);
+                return;
             }
         }
     }
@@ -592,6 +696,14 @@ public sealed class EditorApp : IDisposable
             ImGui.EndCombo();
         }
 
+        if (ModalController.IsActive)
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled("|");
+            ImGui.SameLine();
+            ImGui.TextColored(new Vector4(1.0f, 0.85f, 0.2f, 1.0f), ModalController.GetStatusReadout());
+        }
+
         ImGui.Separator();
     }
 
@@ -842,6 +954,34 @@ public sealed class EditorApp : IDisposable
 
     private void UpdateViewportSelectionInput(Vector2 viewportSize)
     {
+        // Active Modal Transform Operator Drag Handling
+        if (ModalController.IsActive)
+        {
+            if (Raylib.IsMouseButtonPressed(MouseButton.Right) || Raylib.IsKeyPressed(KeyboardKey.Escape))
+            {
+                ModalController.Cancel(Scene, UndoStack);
+                _statusMessage = "Cancelled modal transform.";
+                return;
+            }
+
+            if (Raylib.IsMouseButtonPressed(MouseButton.Left) || Raylib.IsKeyPressed(KeyboardKey.Enter) || Raylib.IsKeyPressed(KeyboardKey.KpEnter))
+            {
+                ModalController.Confirm(Scene, UndoStack);
+                PrimitiveController.Dismiss();
+                _statusMessage = "Committed modal transform.";
+                return;
+            }
+
+            Ray3D currentRay = Camera.ScreenPointToRay(_viewportLocalMousePos, viewportSize);
+            bool ctrlHeld = Raylib.IsKeyDown(KeyboardKey.LeftControl) || Raylib.IsKeyDown(KeyboardKey.RightControl);
+            bool snapGrid = ctrlHeld ? !SnapToGridEnabled : SnapToGridEnabled;
+            bool snapAngle = ctrlHeld ? !SnapAngleEnabled : SnapAngleEnabled;
+
+            ModalController.UpdateRay(Scene, currentRay, snapGrid, CurrentGridStep, snapAngle, CurrentAngleStepDegrees);
+            _statusMessage = ModalController.GetStatusReadout();
+            return;
+        }
+
         // Active Gizmo Drag Handling
         if (Gizmo.IsDragging)
         {
@@ -1327,7 +1467,11 @@ public sealed class EditorApp : IDisposable
         Vector3? pivot = Selection.GetSelectionPivotWorld(Scene);
         string pivotInfo = pivot.HasValue ? $"Pivot: ({pivot.Value.X:0.#}, {pivot.Value.Y:0.#}, {pivot.Value.Z:0.#})" : "Pivot: none";
 
-        ImGui.Text($"{_statusMessage}  |  [{Selection.Mode}] {selectionInfo} | {pivotInfo}  |  Cam: ({camPos.X:0.0}, {camPos.Y:0.0}, {camPos.Z:0.0})  |  FPS: {Raylib.GetFPS()}");
+        string displayStatus = ModalController.IsActive
+            ? ModalController.GetStatusReadout()
+            : _statusMessage;
+
+        ImGui.Text($"{displayStatus}  |  [{Selection.Mode}] {selectionInfo} | {pivotInfo}  |  Cam: ({camPos.X:0.0}, {camPos.Y:0.0}, {camPos.Z:0.0})  |  FPS: {Raylib.GetFPS()}");
 
         ImGui.End();
     }

@@ -64,7 +64,8 @@ public sealed class ViewportRenderer : IDisposable
         ViewportShadingMode shadingMode,
         float gridStep,
         SelectionManager? selection = null,
-        TransformGizmo3D? gizmo = null)
+        TransformGizmo3D? gizmo = null,
+        ModalTransformController? modalController = null)
     {
         if (_renderTarget.Id == 0)
         {
@@ -101,8 +102,35 @@ public sealed class ViewportRenderer : IDisposable
             DrawMeshObject(obj, shadingMode, selection);
         }
 
-        // Render 3D Transform Gizmo on top of scene geometry when selection has a valid pivot
-        if (selection is not null && gizmo is not null)
+        // 1. Render active modal operator infinite guide lines
+        if (modalController is not null && modalController.IsActive)
+        {
+            const float guideExtent = 512.0f;
+            Vector3 guideOrigin = modalController.PivotWorld;
+
+            Rlgl.DrawRenderBatchActive();
+            Rlgl.DisableDepthTest();
+
+            Rlgl.Begin(DrawMode.Lines);
+            if (modalController.Constraint is GizmoAxisConstraint.X or GizmoAxisConstraint.XY or GizmoAxisConstraint.XZ)
+            {
+                EmitLineEditorSpace(guideOrigin - (Vector3.UnitX * guideExtent), guideOrigin + (Vector3.UnitX * guideExtent), AxisXColor);
+            }
+            if (modalController.Constraint is GizmoAxisConstraint.Y or GizmoAxisConstraint.XY or GizmoAxisConstraint.YZ)
+            {
+                EmitLineEditorSpace(guideOrigin - (Vector3.UnitY * guideExtent), guideOrigin + (Vector3.UnitY * guideExtent), AxisYColor);
+            }
+            if (modalController.Constraint is GizmoAxisConstraint.Z or GizmoAxisConstraint.XZ or GizmoAxisConstraint.YZ)
+            {
+                EmitLineEditorSpace(guideOrigin - (Vector3.UnitZ * guideExtent), guideOrigin + (Vector3.UnitZ * guideExtent), AxisZColor);
+            }
+            Rlgl.End();
+
+            Rlgl.DrawRenderBatchActive();
+            Rlgl.EnableDepthTest();
+        }
+        // 2. Render 3D Transform Gizmo on top of scene geometry when selection has a valid pivot
+        else if (selection is not null && gizmo is not null)
         {
             Vector3? pivotOpt = gizmo.IsDragging
                 ? (gizmo.ActiveDragMode == GizmoToolMode.Translate ? gizmo.DragPivotWorld + gizmo.CurrentTranslationDelta : gizmo.DragPivotWorld)
