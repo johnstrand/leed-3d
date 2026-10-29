@@ -1,0 +1,1488 @@
+using System.Numerics;
+using ImGuiNET;
+using Leed3D.Editor.UI;
+using Leed3D.Editor.Viewport;
+using Leed3D.Kernel.Geometry;
+using Leed3D.Kernel.Gizmos;
+using Leed3D.Kernel.Math;
+using Leed3D.Kernel.Primitives;
+using Leed3D.Kernel.Scene;
+using Leed3D.Kernel.Selection;
+using Leed3D.Kernel.Viewport;
+using Raylib_cs;
+using Color = Raylib_cs.Color;
+using RectangleF = System.Drawing.RectangleF;
+
+namespace Leed3D.Editor;
+
+/// <summary>
+/// Main desktop application shell managing the Raylib window, RlImGui docking workspace,
+/// top menu bar, viewport header bar (Projection, Shading, Grid & Angle Snap controls),
+/// 3D viewport camera navigation, primitive creation toolbar, Shift+A quick-add menu,
+/// interactive adjust-primitive popup, and status bar.
+/// </summary>
+public sealed class EditorApp : IDisposable
+{
+    private readonly ViewportRenderer _viewportRenderer = new();
+
+    public EditorScene Scene { get; } = new("Untitled Level");
+    public UndoRedoStack UndoStack { get; } = new();
+    public EditorCamera Camera { get; } = new();
+    public PrimitiveCreationController PrimitiveController { get; }
+    public SelectionManager Selection { get; } = new();
+    public TransformGizmo3D Gizmo { get; } = new();
+    public TransformApplicator Applicator { get; } = new();
+    public ModalTransformController ModalController { get; } = new();
+
+    public ViewportShadingMode ShadingMode { get; set; } = ViewportShadingMode.SolidWithWireframe;
+    public bool SnapToGridEnabled { get; set; } = true;
+    public float CurrentGridStep { get; set; } = 1.0f;
+    public bool SnapAngleEnabled { get; set; } = true;
+    public float CurrentAngleStepDegrees { get; set; } = 15.0f;
+
+    private bool _isViewportHovered;
+    private bool _isViewportFocused;
+    private Vector2 _viewportScreenMin;
+    private Vector2 _viewportLocalMousePos;
+
+    private bool _isMouseDownInViewport;
+    private Vector2 _mouseDownLocalPos;
+    private Vector2 _mouseDownScreenPos;
+    private bool _isDraggingMarquee;
+    private Vector2 _mouseCurrentLocalPos;
+    private Vector2 _mouseCurrentScreenPos;
+
+    private string _statusMessage = "Ready — Click primitive buttons to add, Shift+A for quick-add menu, RMB+WASD to fly.";
+
+    public EditorApp()
+    {
+        PrimitiveController = new PrimitiveCreationController(Scene, UndoStack);
+        InitializeDefaultStarterScene();
+    }
+
+    private void InitializeDefaultStarterScene()
+    {
+        var floorMesh = PrimitiveGenerator.CreateBox(new Vector3(8.0f, 0.5f, 8.0f), materialId: "dev_grid_gray");
+        Scene.AddMeshObject("Floor Block", floorMesh, new Vector3(0.0f, -0.25f, 0.0f));
+
+        var boxMesh = PrimitiveGenerator.CreateBox(new Vector3(2.0f, 2.0f, 2.0f), materialId: "dev_grid_orange");
+        SceneObject cubeObj = Scene.AddMeshObject("Starter Cube", boxMesh, new Vector3(0.0f, 1.0f, 0.0f));
+        Selection.SelectSingleObject(cubeObj.Id);
+    }
+
+    public void Run()
+    {
+        Raylib.SetConfigFlags(ConfigFlags.ResizableWindow | ConfigFlags.Msaa4xHint | ConfigFlags.VSyncHint);
+        Raylib.InitWindow(1600, 920, "Leed3D — 3D Level & Blockout Editor");
+        Raylib.SetTargetFPS(60);
+        Raylib.SetExitKey(KeyboardKey.Null); // Reserve Esc for canceling modal/gizmo operations
+
+        RlImGui.Setup(darkTheme: true, enableDocking: true);
+        _viewportRenderer.EnsureSize(1280, 720);
+
+        while (!Raylib.WindowShouldClose())
+        {
+            float dt = Raylib.GetFrameTime();
+            HandleGlobalShortcuts();
+
+            // Render 3D scene into offscreen RenderTexture2D before drawing ImGui
+            _viewportRenderer.RenderScene(Scene, Camera, ShadingMode, CurrentGridStep, Selection, Gizmo, ModalController);
+
+            Raylib.BeginDrawing();
+            Raylib.ClearBackground(new Color(20, 22, 25, 255));
+
+            RlImGui.Begin(dt);
+            DrawDockspaceAndBars(dt);
+            RlImGui.End();
+
+            Raylib.EndDrawing();
+        }
+    }
+
+    private void HandleGlobalShortcuts()
+    {
+        ImGuiIOPtr io = ImGui.GetIO();
+        if (io.WantTextInput)
+        {
+            return;
+        }
+
+        bool ctrl = Raylib.IsKeyDown(KeyboardKey.LeftControl) || Raylib.IsKeyDown(KeyboardKey.RightControl);
+        bool shift = Raylib.IsKeyDown(KeyboardKey.LeftShift) || Raylib.IsKeyDown(KeyboardKey.RightShift);
+        bool alt = Raylib.IsKeyDown(KeyboardKey.LeftAlt) || Raylib.IsKeyDown(KeyboardKey.RightAlt);
+        bool flying = Raylib.IsMouseButtonDown(MouseButton.Right);
+
+        // Active Modal Transform Operator Shortcuts: Cancel (Esc/RMB), Confirm (Enter/LMB), Axis Locks (X/Y/Z, Shift+X/Y/Z), Numeric Input
+        if (ModalController.IsActive)
+        {
+            if (Raylib.IsKeyPressed(KeyboardKey.Escape) || Raylib.IsMouseButtonPressed(MouseButton.Right))
+            {
+                ModalController.Cancel(Scene, UndoStack);
+                _statusMessage = "Cancelled modal transform.";
+                return;
+            }
+
+            if (Raylib.IsKeyPressed(KeyboardKey.Enter) || Raylib.IsKeyPressed(KeyboardKey.KpEnter) || Raylib.IsMouseButtonPressed(MouseButton.Left))
+            {
+                ModalController.Confirm(Scene, UndoStack);
+                PrimitiveController.Dismiss();
+                _statusMessage = "Committed modal transform.";
+                return;
+            }
+
+            if (Raylib.IsKeyPressed(KeyboardKey.X))
+            {
+                ModalController.HandleAxisKey('X', shift, Scene);
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.Y))
+            {
+                ModalController.HandleAxisKey('Y', shift, Scene);
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.Z))
+            {
+                ModalController.HandleAxisKey('Z', shift, Scene);
+            }
+
+            HandleModalNumericInput();
+            _statusMessage = ModalController.GetStatusReadout();
+            return;
+        }
+
+        // Active Gizmo Drag Shortcuts: Esc/RightClick cancel, X/Y/Z or Shift+X/Y/Z constraint override
+        if (Gizmo.IsDragging)
+        {
+            if (Raylib.IsKeyPressed(KeyboardKey.Escape) || Raylib.IsMouseButtonPressed(MouseButton.Right))
+            {
+                Gizmo.CancelDrag();
+                Applicator.CancelSession(Scene, UndoStack);
+                _statusMessage = "Cancelled gizmo transform.";
+                return;
+            }
+
+            if (Raylib.IsKeyPressed(KeyboardKey.X))
+            {
+                Gizmo.SetConstraintOverride(shift ? GizmoAxisConstraint.YZ : GizmoAxisConstraint.X);
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.Y))
+            {
+                Gizmo.SetConstraintOverride(shift ? GizmoAxisConstraint.XZ : GizmoAxisConstraint.Y);
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.Z))
+            {
+                Gizmo.SetConstraintOverride(shift ? GizmoAxisConstraint.XY : GizmoAxisConstraint.Z);
+            }
+
+            return;
+        }
+
+        // Undo (Ctrl+Z) & Redo (Ctrl+Y or Ctrl+Shift+Z)
+        if (ctrl && !shift && Raylib.IsKeyPressed(KeyboardKey.Z))
+        {
+            if (UndoStack.Undo(Scene))
+            {
+                PrimitiveController.Dismiss();
+                _statusMessage = "Undid last action.";
+            }
+        }
+        else if ((ctrl && Raylib.IsKeyPressed(KeyboardKey.Y)) ||
+                 (ctrl && shift && Raylib.IsKeyPressed(KeyboardKey.Z)))
+        {
+            if (UndoStack.Redo(Scene))
+            {
+                PrimitiveController.Dismiss();
+                _statusMessage = "Redid action.";
+            }
+        }
+
+        // Selection, Mode, Modal Operators & Gizmo Tool Shortcuts (when not in free-fly WASD mode)
+        if (!flying)
+        {
+            // Blender-style modal transform operators (G Grab/Move, R Rotate, S Scale)
+            if (!ctrl && !alt && Selection.HasSelection)
+            {
+                if (Raylib.IsKeyPressed(KeyboardKey.G))
+                {
+                    Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, _viewportRenderer.ViewportSize);
+                    if (ModalController.Start(ModalTransformMode.Move, Scene, Selection, ray, Camera.GetForward(), UndoStack))
+                    {
+                        PrimitiveController.Dismiss();
+                        _statusMessage = ModalController.GetStatusReadout();
+                        return;
+                    }
+                }
+                else if (Raylib.IsKeyPressed(KeyboardKey.R))
+                {
+                    Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, _viewportRenderer.ViewportSize);
+                    if (ModalController.Start(ModalTransformMode.Rotate, Scene, Selection, ray, Camera.GetForward(), UndoStack))
+                    {
+                        PrimitiveController.Dismiss();
+                        _statusMessage = ModalController.GetStatusReadout();
+                        return;
+                    }
+                }
+                else if (Raylib.IsKeyPressed(KeyboardKey.S))
+                {
+                    Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, _viewportRenderer.ViewportSize);
+                    if (ModalController.Start(ModalTransformMode.Scale, Scene, Selection, ray, Camera.GetForward(), UndoStack))
+                    {
+                        PrimitiveController.Dismiss();
+                        _statusMessage = ModalController.GetStatusReadout();
+                        return;
+                    }
+                }
+            }
+
+            if (Raylib.IsKeyPressed(KeyboardKey.Tab))
+            {
+                Selection.ToggleObjectEditMode(Scene);
+                _statusMessage = $"Mode: {Selection.Mode}.";
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.One))
+            {
+                Selection.SetMode(InteractionMode.Vertex, Scene);
+                _statusMessage = "Vertex Select Mode (1).";
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.Two))
+            {
+                Selection.SetMode(InteractionMode.Edge, Scene);
+                _statusMessage = "Edge Select Mode (2).";
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.Three))
+            {
+                Selection.SetMode(InteractionMode.Face, Scene);
+                _statusMessage = "Face Select Mode (3).";
+            }
+            else if (!ctrl && !alt && !shift && Raylib.IsKeyPressed(KeyboardKey.W))
+            {
+                Gizmo.ToolMode = GizmoToolMode.Translate;
+                _statusMessage = "Gizmo Tool: Translate (W).";
+            }
+            else if (!ctrl && !alt && !shift && Selection.Mode == InteractionMode.Object && Raylib.IsKeyPressed(KeyboardKey.E))
+            {
+                Gizmo.ToolMode = GizmoToolMode.Rotate;
+                _statusMessage = "Gizmo Tool: Rotate (E).";
+            }
+            else if (!ctrl && !alt && !shift && !Selection.HasSelection && Raylib.IsKeyPressed(KeyboardKey.R))
+            {
+                Gizmo.ToolMode = GizmoToolMode.Scale;
+                _statusMessage = "Gizmo Tool: Scale (R).";
+            }
+            else if (ctrl && Raylib.IsKeyPressed(KeyboardKey.I))
+            {
+                Selection.InvertSelection(Scene);
+                _statusMessage = $"Inverted {Selection.Mode} selection.";
+            }
+            else if (alt && Raylib.IsKeyPressed(KeyboardKey.A))
+            {
+                Selection.ClearSelection();
+                _statusMessage = "Cleared selection (Alt+A).";
+            }
+            else if (!ctrl && !alt && !shift && Raylib.IsKeyPressed(KeyboardKey.A))
+            {
+                Selection.SelectAll(Scene);
+                _statusMessage = $"Selected all ({Selection.Mode} mode).";
+            }
+        }
+    }
+
+    private void HandleModalNumericInput()
+    {
+        if (Raylib.IsKeyPressed(KeyboardKey.Backspace))
+        {
+            ModalController.HandleBackspace(Scene);
+            return;
+        }
+
+        if (Raylib.IsKeyPressed(KeyboardKey.Minus) || Raylib.IsKeyPressed(KeyboardKey.KpSubtract))
+        {
+            ModalController.HandleNumericKey('-', Scene);
+            return;
+        }
+
+        if (Raylib.IsKeyPressed(KeyboardKey.Period) || Raylib.IsKeyPressed(KeyboardKey.KpDecimal))
+        {
+            ModalController.HandleNumericKey('.', Scene);
+            return;
+        }
+
+        for (int i = 0; i <= 9; i++)
+        {
+            KeyboardKey mainKey = (KeyboardKey)((int)KeyboardKey.Zero + i);
+            KeyboardKey kpKey = (KeyboardKey)((int)KeyboardKey.Kp0 + i);
+            if (Raylib.IsKeyPressed(mainKey) || Raylib.IsKeyPressed(kpKey))
+            {
+                ModalController.HandleNumericKey((char)('0' + i), Scene);
+                return;
+            }
+        }
+    }
+
+    private void DrawDockspaceAndBars(float dt)
+    {
+        ImGuiViewportPtr mainViewport = ImGui.GetMainViewport();
+
+        DrawTopMenuBar();
+
+        const float statusBarHeight = 26.0f;
+        Vector2 workPos = mainViewport.WorkPos;
+        Vector2 workSize = new(mainViewport.WorkSize.X, System.Math.Max(64.0f, mainViewport.WorkSize.Y - statusBarHeight));
+
+        ImGui.SetNextWindowPos(workPos);
+        ImGui.SetNextWindowSize(workSize);
+        ImGui.SetNextWindowViewport(mainViewport.ID);
+
+        ImGuiWindowFlags hostFlags =
+            ImGuiWindowFlags.NoTitleBar |
+            ImGuiWindowFlags.NoCollapse |
+            ImGuiWindowFlags.NoResize |
+            ImGuiWindowFlags.NoMove |
+            ImGuiWindowFlags.NoBringToFrontOnFocus |
+            ImGuiWindowFlags.NoNavFocus |
+            ImGuiWindowFlags.NoBackground;
+
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 0.0f);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 0.0f);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, Vector2.Zero);
+
+        ImGui.Begin("Leed3DMainDockHost", hostFlags);
+        ImGui.PopStyleVar(3);
+
+        uint dockspaceId = ImGui.GetID("Leed3DDockSpace");
+        ImGui.DockSpace(dockspaceId, Vector2.Zero, ImGuiDockNodeFlags.PassthruCentralNode);
+        ImGui.End();
+
+        DrawViewportWindow(dt);
+        DrawSceneSummaryPanel();
+        DrawStatusBar(mainViewport, statusBarHeight);
+    }
+
+    private void DrawTopMenuBar()
+    {
+        if (!ImGui.BeginMainMenuBar())
+        {
+            return;
+        }
+
+        if (ImGui.BeginMenu("File"))
+        {
+            if (ImGui.MenuItem("New Level", "Ctrl+N"))
+            {
+                EditorScene before = Scene.CloneSnapshot();
+                Scene.RestoreFromSnapshot(new EditorScene("Untitled Level"));
+                UndoStack.RecordAction("New Level", before, Scene);
+                PrimitiveController.Dismiss();
+                _statusMessage = "Created new empty level.";
+            }
+
+            if (ImGui.MenuItem("Reset Starter Scene"))
+            {
+                EditorScene before = Scene.CloneSnapshot();
+                Scene.RestoreFromSnapshot(new EditorScene("Untitled Level"));
+                InitializeDefaultStarterScene();
+                UndoStack.RecordAction("Reset Starter Scene", before, Scene);
+                PrimitiveController.Dismiss();
+                _statusMessage = "Reset starter blockout scene.";
+            }
+
+            ImGui.Separator();
+            if (ImGui.MenuItem("Exit"))
+            {
+                Raylib.CloseWindow();
+            }
+            ImGui.EndMenu();
+        }
+
+        if (ImGui.BeginMenu("Edit"))
+        {
+            string undoLabel = UndoStack.CanUndo ? $"Undo {UndoStack.NextUndoDescription}" : "Undo";
+            if (ImGui.MenuItem(undoLabel, "Ctrl+Z", false, UndoStack.CanUndo))
+            {
+                UndoStack.Undo(Scene);
+                PrimitiveController.Dismiss();
+            }
+
+            string redoLabel = UndoStack.CanRedo ? $"Redo {UndoStack.NextRedoDescription}" : "Redo";
+            if (ImGui.MenuItem(redoLabel, "Ctrl+Y", false, UndoStack.CanRedo))
+            {
+                UndoStack.Redo(Scene);
+                PrimitiveController.Dismiss();
+            }
+            ImGui.EndMenu();
+        }
+
+        if (ImGui.BeginMenu("Add"))
+        {
+            DrawPrimitiveMenuItems();
+            ImGui.EndMenu();
+        }
+
+        if (ImGui.BeginMenu("View"))
+        {
+            if (ImGui.MenuItem("Perspective", "Numpad 5 / V", Camera.ProjectionMode == ViewportProjectionMode.Perspective))
+            {
+                Camera.SetProjectionMode(ViewportProjectionMode.Perspective);
+            }
+            if (ImGui.MenuItem("Top (Ortho Y - XZ Plane)", "Numpad 7 / Alt+Y", Camera.ProjectionMode == ViewportProjectionMode.OrthoY))
+            {
+                Camera.SetProjectionMode(ViewportProjectionMode.OrthoY);
+            }
+            if (ImGui.MenuItem("Front (Ortho Z - XY Plane)", "Numpad 1 / Alt+Z", Camera.ProjectionMode == ViewportProjectionMode.OrthoZ))
+            {
+                Camera.SetProjectionMode(ViewportProjectionMode.OrthoZ);
+            }
+            if (ImGui.MenuItem("Right (Ortho X - YZ Plane)", "Numpad 3 / Alt+X", Camera.ProjectionMode == ViewportProjectionMode.OrthoX))
+            {
+                Camera.SetProjectionMode(ViewportProjectionMode.OrthoX);
+            }
+
+            ImGui.Separator();
+            bool showGrid = _viewportRenderer.ShowGrid;
+            if (ImGui.MenuItem("Show Grid", null, ref showGrid))
+            {
+                _viewportRenderer.ShowGrid = showGrid;
+            }
+
+            bool showAxes = _viewportRenderer.ShowOriginAxes;
+            if (ImGui.MenuItem("Show Origin Axes", null, ref showAxes))
+            {
+                _viewportRenderer.ShowOriginAxes = showAxes;
+            }
+
+            ImGui.Separator();
+            if (ImGui.MenuItem("Frame Origin", "Home / F"))
+            {
+                Camera.FrameTarget(Vector3.Zero, 5.0f);
+            }
+
+            ImGui.EndMenu();
+        }
+
+        ImGui.EndMainMenuBar();
+    }
+
+    private void DrawPrimitiveMenuItems()
+    {
+        if (ImGui.MenuItem("Plane"))
+        {
+            SpawnPrimitive(PrimitiveType.Plane);
+        }
+        if (ImGui.MenuItem("Box"))
+        {
+            SpawnPrimitive(PrimitiveType.Box);
+        }
+        if (ImGui.MenuItem("Cylinder"))
+        {
+            SpawnPrimitive(PrimitiveType.Cylinder);
+        }
+        if (ImGui.MenuItem("Cone"))
+        {
+            SpawnPrimitive(PrimitiveType.Cone);
+        }
+        if (ImGui.MenuItem("Geosphere"))
+        {
+            SpawnPrimitive(PrimitiveType.Geosphere);
+        }
+        if (ImGui.MenuItem("Icosahedron"))
+        {
+            SpawnPrimitive(PrimitiveType.Icosahedron);
+        }
+    }
+
+    public void SpawnPrimitive(PrimitiveType type)
+    {
+        Vector3 spawnPos = Vector3.Zero;
+        if (SnapToGridEnabled)
+        {
+            spawnPos = GridSnapper.SnapVector(spawnPos, CurrentGridStep);
+        }
+
+        SceneObject obj = PrimitiveController.SpawnPrimitive(type, spawnPos);
+        Selection.SelectSingleObject(obj.Id);
+        _statusMessage = $"Spawned {obj.Name} at ({spawnPos.X:0.#}, {spawnPos.Y:0.#}, {spawnPos.Z:0.#}). Adjust parameters in the overlay panel.";
+    }
+
+    private void DrawViewportWindow(float dt)
+    {
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(4.0f, 4.0f));
+        ImGui.Begin("3D Viewport", ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse);
+        ImGui.PopStyleVar();
+
+        DrawViewportHeaderToolbar();
+        DrawPrimitiveToolbar();
+
+        Vector2 avail = ImGui.GetContentRegionAvail();
+        int targetW = System.Math.Max(64, (int)avail.X);
+        int targetH = System.Math.Max(64, (int)avail.Y);
+        _viewportRenderer.EnsureSize(targetW, targetH);
+
+        _viewportScreenMin = ImGui.GetCursorScreenPos();
+        RlImGui.ImageRenderTexture(_viewportRenderer.RenderTarget, new Vector2(targetW, targetH));
+
+        _isViewportHovered = ImGui.IsItemHovered();
+        _isViewportFocused = ImGui.IsWindowFocused();
+
+        Vector2 mouseScreen = ImGui.GetMousePos();
+        _viewportLocalMousePos = mouseScreen - _viewportScreenMin;
+
+        // Shift+A Quick Add Menu in Viewport
+        bool shiftDown = Raylib.IsKeyDown(KeyboardKey.LeftShift) || Raylib.IsKeyDown(KeyboardKey.RightShift);
+        if (_isViewportHovered && shiftDown && Raylib.IsKeyPressed(KeyboardKey.A))
+        {
+            ImGui.OpenPopup("ShiftAQuickAddPopup");
+        }
+
+        if (ImGui.BeginPopup("ShiftAQuickAddPopup"))
+        {
+            ImGui.TextDisabled("Add Mesh Primitive");
+            ImGui.Separator();
+            DrawPrimitiveMenuItems();
+            ImGui.EndPopup();
+        }
+
+        DrawViewportAxisCompassOverlay(_viewportScreenMin, new Vector2(targetW, targetH));
+
+        // Vertex selection overlay (dots / squares) in Vertex mode
+        if (Selection.Mode == InteractionMode.Vertex && Selection.ActiveObjectId.HasValue)
+        {
+            DrawVertexSelectionOverlay(new Vector2(targetW, targetH));
+        }
+
+        // Marquee drag selection box overlay
+        if (_isDraggingMarquee)
+        {
+            ImDrawListPtr drawList = ImGui.GetWindowDrawList();
+            Vector2 min = Vector2.Min(_mouseDownScreenPos, _mouseCurrentScreenPos);
+            Vector2 max = Vector2.Max(_mouseDownScreenPos, _mouseCurrentScreenPos);
+
+            drawList.PushClipRect(_viewportScreenMin, _viewportScreenMin + new Vector2(targetW, targetH), true);
+            drawList.AddRectFilled(min, max, 0x33FFA020);
+            drawList.AddRect(min, max, 0xEEFFA020, 0.0f, ImDrawFlags.None, 1.5f);
+            drawList.PopClipRect();
+        }
+
+        // Interactive "Adjust Last Operation" overlay popup in bottom-left corner of viewport
+        if (PrimitiveController.IsActive)
+        {
+            DrawAdjustPrimitiveOverlay(_viewportScreenMin, new Vector2(targetW, targetH));
+        }
+
+        if (_isViewportHovered || Raylib.IsMouseButtonDown(MouseButton.Right) || Raylib.IsMouseButtonDown(MouseButton.Middle))
+        {
+            UpdateViewportCameraInput(dt, new Vector2(targetW, targetH));
+        }
+
+        UpdateViewportSelectionInput(new Vector2(targetW, targetH));
+
+        ImGui.End();
+    }
+
+    private void DrawViewportHeaderToolbar()
+    {
+        // 0. Interaction Mode Selector
+        ImGui.TextDisabled("Mode:");
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Object", Selection.Mode == InteractionMode.Object))
+        {
+            Selection.SetMode(InteractionMode.Object, Scene);
+        }
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Vertex (1)", Selection.Mode == InteractionMode.Vertex))
+        {
+            Selection.SetMode(InteractionMode.Vertex, Scene);
+        }
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Edge (2)", Selection.Mode == InteractionMode.Edge))
+        {
+            Selection.SetMode(InteractionMode.Edge, Scene);
+        }
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Face (3)", Selection.Mode == InteractionMode.Face))
+        {
+            Selection.SetMode(InteractionMode.Face, Scene);
+        }
+
+        ImGui.SameLine();
+        ImGui.TextDisabled("| View:");
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Persp", Camera.ProjectionMode == ViewportProjectionMode.Perspective))
+        {
+            Camera.SetProjectionMode(ViewportProjectionMode.Perspective);
+        }
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Ortho X", Camera.ProjectionMode == ViewportProjectionMode.OrthoX))
+        {
+            Camera.SetProjectionMode(ViewportProjectionMode.OrthoX);
+        }
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Ortho Y", Camera.ProjectionMode == ViewportProjectionMode.OrthoY))
+        {
+            Camera.SetProjectionMode(ViewportProjectionMode.OrthoY);
+        }
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Ortho Z", Camera.ProjectionMode == ViewportProjectionMode.OrthoZ))
+        {
+            Camera.SetProjectionMode(ViewportProjectionMode.OrthoZ);
+        }
+
+        ImGui.SameLine();
+        ImGui.TextDisabled("| Shading:");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(145.0f);
+        string currentShadingLabel = ShadingMode switch
+        {
+            ViewportShadingMode.SolidWithWireframe => "Solid + Wire",
+            ViewportShadingMode.Solid => "Solid",
+            ViewportShadingMode.Wireframe => "Wireframe",
+            ViewportShadingMode.LitPreview => "Lit Preview",
+            _ => "Solid + Wire"
+        };
+
+        if (ImGui.BeginCombo("##ShadingCombo", currentShadingLabel))
+        {
+            if (ImGui.Selectable("Solid + Wire", ShadingMode == ViewportShadingMode.SolidWithWireframe))
+                ShadingMode = ViewportShadingMode.SolidWithWireframe;
+            if (ImGui.Selectable("Solid", ShadingMode == ViewportShadingMode.Solid))
+                ShadingMode = ViewportShadingMode.Solid;
+            if (ImGui.Selectable("Wireframe", ShadingMode == ViewportShadingMode.Wireframe))
+                ShadingMode = ViewportShadingMode.Wireframe;
+            ImGui.EndCombo();
+        }
+
+        // 2. Grid Snap Selector
+        ImGui.SameLine();
+        ImGui.TextDisabled("|");
+        ImGui.SameLine();
+        bool snapGrid = SnapToGridEnabled;
+        if (ImGui.Checkbox("Grid Snap", ref snapGrid))
+        {
+            SnapToGridEnabled = snapGrid;
+        }
+
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(75.0f);
+        if (ImGui.BeginCombo("##GridStepCombo", $"{CurrentGridStep:0.###}"))
+        {
+            foreach (float step in GridSnapper.DefaultGridSteps)
+            {
+                bool selected = MathF.Abs(CurrentGridStep - step) < 1e-4f;
+                if (ImGui.Selectable($"{step:0.###}", selected))
+                {
+                    CurrentGridStep = step;
+                }
+            }
+            ImGui.EndCombo();
+        }
+
+        // 3. Angle Snap Selector
+        ImGui.SameLine();
+        bool snapAngle = SnapAngleEnabled;
+        if (ImGui.Checkbox("Angle Snap", ref snapAngle))
+        {
+            SnapAngleEnabled = snapAngle;
+        }
+
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(65.0f);
+        if (ImGui.BeginCombo("##AngleStepCombo", $"{CurrentAngleStepDegrees:0}°"))
+        {
+            foreach (float angleStep in GridSnapper.DefaultAngleSnapPresets)
+            {
+                bool selected = MathF.Abs(CurrentAngleStepDegrees - angleStep) < 1e-4f;
+                if (ImGui.Selectable($"{angleStep:0}°", selected))
+                {
+                    CurrentAngleStepDegrees = angleStep;
+                }
+            }
+            ImGui.EndCombo();
+        }
+
+        if (ModalController.IsActive)
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled("|");
+            ImGui.SameLine();
+            ImGui.TextColored(new Vector4(1.0f, 0.85f, 0.2f, 1.0f), ModalController.GetStatusReadout());
+        }
+
+        ImGui.Separator();
+    }
+
+    private void DrawPrimitiveToolbar()
+    {
+        ImGui.TextDisabled("Gizmo:");
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Move (W)", Gizmo.ToolMode == GizmoToolMode.Translate))
+        {
+            Gizmo.ToolMode = GizmoToolMode.Translate;
+        }
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Rotate (E)", Gizmo.ToolMode == GizmoToolMode.Rotate))
+        {
+            Gizmo.ToolMode = GizmoToolMode.Rotate;
+        }
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Scale (R)", Gizmo.ToolMode == GizmoToolMode.Scale))
+        {
+            Gizmo.ToolMode = GizmoToolMode.Scale;
+        }
+        ImGui.SameLine();
+        if (ImGui.RadioButton("Universal", Gizmo.ToolMode == GizmoToolMode.Universal))
+        {
+            Gizmo.ToolMode = GizmoToolMode.Universal;
+        }
+
+        ImGui.SameLine();
+        ImGui.TextDisabled("| Add Primitive:");
+        ImGui.SameLine();
+
+        if (ImGui.Button("Plane")) SpawnPrimitive(PrimitiveType.Plane);
+        ImGui.SameLine();
+        if (ImGui.Button("Box")) SpawnPrimitive(PrimitiveType.Box);
+        ImGui.SameLine();
+        if (ImGui.Button("Cylinder")) SpawnPrimitive(PrimitiveType.Cylinder);
+        ImGui.SameLine();
+        if (ImGui.Button("Cone")) SpawnPrimitive(PrimitiveType.Cone);
+        ImGui.SameLine();
+        if (ImGui.Button("Geosphere")) SpawnPrimitive(PrimitiveType.Geosphere);
+        ImGui.SameLine();
+        if (ImGui.Button("Icosahedron")) SpawnPrimitive(PrimitiveType.Icosahedron);
+
+        ImGui.Separator();
+    }
+
+    private void DrawAdjustPrimitiveOverlay(Vector2 viewportMin, Vector2 viewportSize)
+    {
+        const float overlayWidth = 280.0f;
+        const float margin = 12.0f;
+
+        Vector2 overlayPos = new(viewportMin.X + margin, viewportMin.Y + viewportSize.Y - 240.0f);
+        ImGui.SetNextWindowPos(overlayPos, ImGuiCond.Always);
+        ImGui.SetNextWindowSize(new Vector2(overlayWidth, 0.0f));
+
+        ImGuiWindowFlags flags =
+            ImGuiWindowFlags.NoMove |
+            ImGuiWindowFlags.NoResize |
+            ImGuiWindowFlags.AlwaysAutoResize |
+            ImGuiWindowFlags.NoSavedSettings;
+
+        ImGui.PushStyleColor(ImGuiCol.WindowBg, new Vector4(0.12f, 0.14f, 0.17f, 0.95f));
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 6.0f);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 1.0f);
+
+        string title = $"Adjust {PrimitiveController.ActivePrimitiveType}###AdjustLastPrimitivePopup";
+        bool open = true;
+
+        if (ImGui.Begin(title, ref open, flags))
+        {
+            bool changed = false;
+
+            switch (PrimitiveController.ActivePrimitiveType)
+            {
+                case PrimitiveType.Plane:
+                {
+                    PlaneParams p = PrimitiveController.PlaneParams;
+                    float w = p.Width;
+                    float d = p.Depth;
+                    int segW = p.WidthSegments;
+                    int segD = p.DepthSegments;
+
+                    if (ImGui.DragFloat("Width", ref w, 0.1f, 0.1f, 100.0f)) { p = p with { Width = w }; changed = true; }
+                    if (ImGui.DragFloat("Depth", ref d, 0.1f, 0.1f, 100.0f)) { p = p with { Depth = d }; changed = true; }
+                    if (ImGui.SliderInt("Width Segs", ref segW, 1, 32)) { p = p with { WidthSegments = segW }; changed = true; }
+                    if (ImGui.SliderInt("Depth Segs", ref segD, 1, 32)) { p = p with { DepthSegments = segD }; changed = true; }
+
+                    if (changed) PrimitiveController.PlaneParams = p;
+                    break;
+                }
+
+                case PrimitiveType.Box:
+                {
+                    BoxParams p = PrimitiveController.BoxParams;
+                    Vector3 size = p.Size;
+                    int segX = p.SegmentsX;
+                    int segY = p.SegmentsY;
+                    int segZ = p.SegmentsZ;
+                    bool inv = p.InvertNormals;
+
+                    if (ImGui.DragFloat3("Size", ref size, 0.1f, 0.1f, 100.0f)) { p = p with { Size = size }; changed = true; }
+                    if (ImGui.SliderInt("Segments X", ref segX, 1, 32)) { p = p with { SegmentsX = segX }; changed = true; }
+                    if (ImGui.SliderInt("Segments Y", ref segY, 1, 32)) { p = p with { SegmentsY = segY }; changed = true; }
+                    if (ImGui.SliderInt("Segments Z", ref segZ, 1, 32)) { p = p with { SegmentsZ = segZ }; changed = true; }
+                    if (ImGui.Checkbox("Invert Normals (Room)", ref inv)) { p = p with { InvertNormals = inv }; changed = true; }
+
+                    if (changed) PrimitiveController.BoxParams = p;
+                    break;
+                }
+
+                case PrimitiveType.Cylinder:
+                {
+                    CylinderParams p = PrimitiveController.CylinderParams;
+                    float radius = p.Radius;
+                    float height = p.Height;
+                    int radSeg = p.RadialSegments;
+                    int hSeg = p.HeightSegments;
+                    bool capTop = p.CapTop;
+                    bool capBottom = p.CapBottom;
+
+                    if (ImGui.DragFloat("Radius", ref radius, 0.05f, 0.1f, 50.0f)) { p = p with { Radius = radius }; changed = true; }
+                    if (ImGui.DragFloat("Height", ref height, 0.1f, 0.1f, 100.0f)) { p = p with { Height = height }; changed = true; }
+                    if (ImGui.SliderInt("Radial Segs", ref radSeg, 3, 64)) { p = p with { RadialSegments = radSeg }; changed = true; }
+                    if (ImGui.SliderInt("Height Segs", ref hSeg, 1, 16)) { p = p with { HeightSegments = hSeg }; changed = true; }
+                    if (ImGui.Checkbox("Cap Top", ref capTop)) { p = p with { CapTop = capTop }; changed = true; }
+                    ImGui.SameLine();
+                    if (ImGui.Checkbox("Cap Bottom", ref capBottom)) { p = p with { CapBottom = capBottom }; changed = true; }
+
+                    if (changed) PrimitiveController.CylinderParams = p;
+                    break;
+                }
+
+                case PrimitiveType.Cone:
+                {
+                    ConeParams p = PrimitiveController.ConeParams;
+                    float radius = p.Radius;
+                    float height = p.Height;
+                    int radSeg = p.RadialSegments;
+                    bool capBottom = p.CapBottom;
+
+                    if (ImGui.DragFloat("Radius", ref radius, 0.05f, 0.1f, 50.0f)) { p = p with { Radius = radius }; changed = true; }
+                    if (ImGui.DragFloat("Height", ref height, 0.1f, 0.1f, 100.0f)) { p = p with { Height = height }; changed = true; }
+                    if (ImGui.SliderInt("Radial Segs", ref radSeg, 3, 64)) { p = p with { RadialSegments = radSeg }; changed = true; }
+                    if (ImGui.Checkbox("Cap Bottom", ref capBottom)) { p = p with { CapBottom = capBottom }; changed = true; }
+
+                    if (changed) PrimitiveController.ConeParams = p;
+                    break;
+                }
+
+                case PrimitiveType.Icosahedron:
+                {
+                    IcosahedronParams p = PrimitiveController.IcosahedronParams;
+                    float radius = p.Radius;
+
+                    if (ImGui.DragFloat("Radius", ref radius, 0.05f, 0.1f, 50.0f)) { p = p with { Radius = radius }; changed = true; }
+
+                    if (changed) PrimitiveController.IcosahedronParams = p;
+                    break;
+                }
+
+                case PrimitiveType.Geosphere:
+                {
+                    GeosphereParams p = PrimitiveController.GeosphereParams;
+                    float radius = p.Radius;
+                    int subs = p.Subdivisions;
+
+                    if (ImGui.DragFloat("Radius", ref radius, 0.05f, 0.1f, 50.0f)) { p = p with { Radius = radius }; changed = true; }
+                    if (ImGui.SliderInt("Subdivisions", ref subs, 0, 4)) { p = p with { Subdivisions = subs }; changed = true; }
+
+                    if (changed) PrimitiveController.GeosphereParams = p;
+                    break;
+                }
+            }
+
+            if (changed)
+            {
+                PrimitiveController.RegenerateActiveMesh();
+            }
+
+            ImGui.Separator();
+            if (ImGui.Button("Done", new Vector2(-1.0f, 0.0f)))
+            {
+                open = false;
+            }
+
+            ImGui.End();
+        }
+
+        ImGui.PopStyleVar(2);
+        ImGui.PopStyleColor();
+
+        if (!open)
+        {
+            PrimitiveController.Dismiss();
+        }
+    }
+
+    private void DrawVertexSelectionOverlay(Vector2 viewportSize)
+    {
+        if (!Selection.ActiveObjectId.HasValue)
+        {
+            return;
+        }
+
+        SceneObject? activeObj = Scene.GetObject(Selection.ActiveObjectId.Value);
+        if (activeObj?.Mesh is null)
+        {
+            return;
+        }
+
+        Matrix4x4 localToWorld = activeObj.Transform.GetLocalMatrix();
+        ImDrawListPtr drawList = ImGui.GetWindowDrawList();
+        drawList.PushClipRect(_viewportScreenMin, _viewportScreenMin + viewportSize, true);
+
+        const uint unselectedDotColor = 0xFF805520;
+        const uint unselectedBorderColor = 0xFFD0A040;
+        const uint selectedSquareColor = 0xFF18A0FF;
+        const uint selectedBorderColor = 0xFFFFFFFF;
+
+        foreach (MeshVertex vertex in activeObj.Mesh.Vertices)
+        {
+            Vector3 wPos = Vector3.Transform(vertex.Position, localToWorld);
+            Vector2? sPos = Camera.WorldToScreenPoint(wPos, viewportSize);
+            if (!sPos.HasValue)
+            {
+                continue;
+            }
+
+            Vector2 pt = _viewportScreenMin + sPos.Value;
+            bool isSelected = Selection.SelectedVertexIds.Contains(vertex.Id);
+
+            if (isSelected)
+            {
+                // 8px bright orange/yellow square with white outline
+                drawList.AddRectFilled(pt - new Vector2(4, 4), pt + new Vector2(4, 4), selectedSquareColor);
+                drawList.AddRect(pt - new Vector2(4, 4), pt + new Vector2(4, 4), selectedBorderColor, 0.0f, ImDrawFlags.None, 1.0f);
+            }
+            else
+            {
+                // 5px cyan/dark dot
+                drawList.AddCircleFilled(pt, 2.5f, unselectedDotColor);
+                drawList.AddCircle(pt, 2.5f, unselectedBorderColor, 0, 1.0f);
+            }
+        }
+
+        drawList.PopClipRect();
+    }
+
+    private void UpdateViewportSelectionInput(Vector2 viewportSize)
+    {
+        // Active Modal Transform Operator Drag Handling
+        if (ModalController.IsActive)
+        {
+            if (Raylib.IsMouseButtonPressed(MouseButton.Right) || Raylib.IsKeyPressed(KeyboardKey.Escape))
+            {
+                ModalController.Cancel(Scene, UndoStack);
+                _statusMessage = "Cancelled modal transform.";
+                return;
+            }
+
+            if (Raylib.IsMouseButtonPressed(MouseButton.Left) || Raylib.IsKeyPressed(KeyboardKey.Enter) || Raylib.IsKeyPressed(KeyboardKey.KpEnter))
+            {
+                ModalController.Confirm(Scene, UndoStack);
+                PrimitiveController.Dismiss();
+                _statusMessage = "Committed modal transform.";
+                return;
+            }
+
+            Ray3D currentRay = Camera.ScreenPointToRay(_viewportLocalMousePos, viewportSize);
+            bool ctrlHeld = Raylib.IsKeyDown(KeyboardKey.LeftControl) || Raylib.IsKeyDown(KeyboardKey.RightControl);
+            bool snapGrid = ctrlHeld ? !SnapToGridEnabled : SnapToGridEnabled;
+            bool snapAngle = ctrlHeld ? !SnapAngleEnabled : SnapAngleEnabled;
+
+            ModalController.UpdateRay(Scene, currentRay, snapGrid, CurrentGridStep, snapAngle, CurrentAngleStepDegrees);
+            _statusMessage = ModalController.GetStatusReadout();
+            return;
+        }
+
+        // Active Gizmo Drag Handling
+        if (Gizmo.IsDragging)
+        {
+            if (Raylib.IsMouseButtonPressed(MouseButton.Right) || Raylib.IsKeyPressed(KeyboardKey.Escape))
+            {
+                Gizmo.CancelDrag();
+                Applicator.CancelSession(Scene, UndoStack);
+                _statusMessage = "Cancelled gizmo transform.";
+                return;
+            }
+
+            if (Raylib.IsMouseButtonDown(MouseButton.Left))
+            {
+                Ray3D dragRay = Camera.ScreenPointToRay(_viewportLocalMousePos, viewportSize);
+                bool ctrlHeld = Raylib.IsKeyDown(KeyboardKey.LeftControl) || Raylib.IsKeyDown(KeyboardKey.RightControl);
+                bool snapGrid = ctrlHeld ? !SnapToGridEnabled : SnapToGridEnabled;
+                bool snapAngle = ctrlHeld ? !SnapAngleEnabled : SnapAngleEnabled;
+
+                Gizmo.UpdateDrag(dragRay, snapGrid, CurrentGridStep, snapAngle, CurrentAngleStepDegrees);
+                Applicator.ApplyGizmo(Scene, Gizmo);
+
+                _statusMessage = Gizmo.ActiveDragMode switch
+                {
+                    GizmoToolMode.Translate => $"Translate ({Gizmo.ActiveConstraint}): ({Gizmo.CurrentTranslationDelta.X:+0.00;-0.00;0.00}, {Gizmo.CurrentTranslationDelta.Y:+0.00;-0.00;0.00}, {Gizmo.CurrentTranslationDelta.Z:+0.00;-0.00;0.00})",
+                    GizmoToolMode.Rotate => $"Rotate ({Gizmo.ActiveConstraint}): {Gizmo.CurrentAngleDegrees:+0.0;-0.0;0.0}°",
+                    GizmoToolMode.Scale => $"Scale ({Gizmo.ActiveConstraint}): ({Gizmo.CurrentScaleMultiplier.X:0.00}, {Gizmo.CurrentScaleMultiplier.Y:0.00}, {Gizmo.CurrentScaleMultiplier.Z:0.00})",
+                    _ => "Transforming..."
+                };
+                return;
+            }
+
+            if (Raylib.IsMouseButtonReleased(MouseButton.Left))
+            {
+                Gizmo.EndDrag();
+                Applicator.CommitSession(Scene, UndoStack);
+                PrimitiveController.Dismiss();
+                _statusMessage = "Committed gizmo transform.";
+                return;
+            }
+        }
+
+        // Don't interfere if right or middle mouse buttons are used for camera navigation
+        if (Raylib.IsMouseButtonDown(MouseButton.Right) || Raylib.IsMouseButtonDown(MouseButton.Middle))
+        {
+            _isMouseDownInViewport = false;
+            _isDraggingMarquee = false;
+            Gizmo.HoveredConstraint = GizmoAxisConstraint.None;
+            return;
+        }
+
+        Vector2 mouseScreen = ImGui.GetMousePos();
+
+        // Check if mouse is over adjust primitive overlay window in bottom-left
+        bool overAdjustOverlay = false;
+        if (PrimitiveController.IsActive)
+        {
+            const float overlayWidth = 280.0f;
+            const float margin = 12.0f;
+            Vector2 overlayPos = new(_viewportScreenMin.X + margin, _viewportScreenMin.Y + viewportSize.Y - 240.0f);
+            if (mouseScreen.X >= overlayPos.X && mouseScreen.X <= overlayPos.X + overlayWidth &&
+                mouseScreen.Y >= overlayPos.Y && mouseScreen.Y <= _viewportScreenMin.Y + viewportSize.Y)
+            {
+                overAdjustOverlay = true;
+            }
+        }
+
+        // Update Gizmo Hover State when not dragging marquee
+        Vector3? activePivot = Selection.GetSelectionPivotWorld(Scene);
+        if (_isViewportHovered && !overAdjustOverlay && !_isDraggingMarquee && activePivot.HasValue)
+        {
+            Ray3D hoverRay = Camera.ScreenPointToRay(_viewportLocalMousePos, viewportSize);
+            float gizmoScale = TransformGizmo3D.ComputeGizmoScale(Camera, activePivot.Value);
+            Gizmo.HoveredConstraint = Gizmo.HitTest(hoverRay, activePivot.Value, gizmoScale, Gizmo.ToolMode);
+        }
+        else if (!_isMouseDownInViewport)
+        {
+            Gizmo.HoveredConstraint = GizmoAxisConstraint.None;
+        }
+
+        // 1. Mouse Down
+        if (_isViewportHovered && !overAdjustOverlay && Raylib.IsMouseButtonPressed(MouseButton.Left))
+        {
+            if (!ImGui.IsAnyItemActive())
+            {
+                // If hovering a 3D Gizmo handle, start gizmo drag instead of selection/marquee
+                if (Gizmo.HoveredConstraint != GizmoAxisConstraint.None && activePivot.HasValue)
+                {
+                    Ray3D startRay = Camera.ScreenPointToRay(_viewportLocalMousePos, viewportSize);
+                    Gizmo.BeginDrag(Gizmo.ToolMode, Gizmo.HoveredConstraint, activePivot.Value, startRay, Camera.GetForward());
+                    Applicator.BeginSession(
+                        Scene,
+                        Selection,
+                        activePivot.Value,
+                        UndoStack,
+                        $"{Gizmo.ActiveDragMode} ({Gizmo.ActiveConstraint})");
+                    PrimitiveController.Dismiss();
+                    return;
+                }
+
+                _isMouseDownInViewport = true;
+                _mouseDownLocalPos = _viewportLocalMousePos;
+                _mouseDownScreenPos = mouseScreen;
+                _mouseCurrentLocalPos = _viewportLocalMousePos;
+                _mouseCurrentScreenPos = mouseScreen;
+                _isDraggingMarquee = false;
+            }
+        }
+
+        // 2. Mouse Dragging
+        if (_isMouseDownInViewport && Raylib.IsMouseButtonDown(MouseButton.Left))
+        {
+            _mouseCurrentLocalPos = _viewportLocalMousePos;
+            _mouseCurrentScreenPos = mouseScreen;
+
+            if (!_isDraggingMarquee && Vector2.Distance(_mouseDownScreenPos, mouseScreen) > 4.0f)
+            {
+                _isDraggingMarquee = true;
+            }
+        }
+
+        // 3. Mouse Released
+        if (_isMouseDownInViewport && Raylib.IsMouseButtonReleased(MouseButton.Left))
+        {
+            _isMouseDownInViewport = false;
+            bool shiftHeld = Raylib.IsKeyDown(KeyboardKey.LeftShift) || Raylib.IsKeyDown(KeyboardKey.RightShift);
+
+            if (_isDraggingMarquee)
+            {
+                _isDraggingMarquee = false;
+                ExecuteMarqueeSelection(viewportSize, shiftHeld);
+            }
+            else
+            {
+                ExecuteSingleClickPicking(viewportSize, shiftHeld);
+            }
+        }
+    }
+
+    private void ExecuteMarqueeSelection(Vector2 viewportSize, bool shiftHeld)
+    {
+        float minX = System.Math.Min(_mouseDownLocalPos.X, _mouseCurrentLocalPos.X);
+        float maxX = System.Math.Max(_mouseDownLocalPos.X, _mouseCurrentLocalPos.X);
+        float minY = System.Math.Min(_mouseDownLocalPos.Y, _mouseCurrentLocalPos.Y);
+        float maxY = System.Math.Max(_mouseDownLocalPos.Y, _mouseCurrentLocalPos.Y);
+        var screenRect = new RectangleF(minX, minY, System.Math.Max(1.0f, maxX - minX), System.Math.Max(1.0f, maxY - minY));
+
+        Func<Vector3, Vector2?> worldToScreen = pt => Camera.WorldToScreenPoint(pt, viewportSize);
+
+        if (Selection.Mode == InteractionMode.Object)
+        {
+            List<int> picked = MeshPicker.PickObjectsBoxMarquee(Scene, screenRect, worldToScreen);
+            if (!shiftHeld)
+            {
+                Selection.ClearSelection();
+            }
+
+            foreach (int id in picked)
+            {
+                Selection.ToggleSelectObject(id);
+            }
+
+            _statusMessage = $"Box selected {Selection.SelectedObjectIds.Count} object(s).";
+        }
+        else if (Selection.ActiveObjectId.HasValue && Scene.GetObject(Selection.ActiveObjectId.Value) is { } activeObj)
+        {
+            MarqueeSelectionResult res = MeshPicker.PickBoxMarquee(activeObj, Selection.Mode, screenRect, worldToScreen);
+
+            switch (Selection.Mode)
+            {
+                case InteractionMode.Vertex:
+                    if (!shiftHeld) Selection.ClearSelection();
+                    foreach (int vId in res.VertexIds) Selection.ToggleSelectVertex(vId);
+                    _statusMessage = $"Box selected {Selection.SelectedVertexIds.Count} vertex/vertices.";
+                    break;
+
+                case InteractionMode.Edge:
+                    if (!shiftHeld) Selection.ClearSelection();
+                    foreach (EdgeKey edge in res.Edges) Selection.ToggleSelectEdge(edge);
+                    _statusMessage = $"Box selected {Selection.SelectedEdges.Count} edge(s).";
+                    break;
+
+                case InteractionMode.Face:
+                    if (!shiftHeld) Selection.ClearSelection();
+                    foreach (int fId in res.FaceIds) Selection.ToggleSelectFace(fId);
+                    _statusMessage = $"Box selected {Selection.SelectedFaceIds.Count} face(s).";
+                    break;
+            }
+        }
+    }
+
+    private void ExecuteSingleClickPicking(Vector2 viewportSize, bool shiftHeld)
+    {
+        Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, viewportSize);
+        Func<Vector3, Vector2?> worldToScreen = pt => Camera.WorldToScreenPoint(pt, viewportSize);
+
+        if (Selection.Mode == InteractionMode.Object)
+        {
+            ObjectHit? hit = MeshPicker.PickObject(Scene, ray);
+            if (hit.HasValue)
+            {
+                if (shiftHeld)
+                {
+                    Selection.ToggleSelectObject(hit.Value.ObjectId);
+                }
+                else
+                {
+                    Selection.SelectSingleObject(hit.Value.ObjectId);
+                }
+
+                SceneObject? obj = Scene.GetObject(hit.Value.ObjectId);
+                _statusMessage = $"Selected '{obj?.Name ?? "Object"}' (Face {hit.Value.FaceId}). Total: {Selection.SelectedObjectIds.Count}.";
+            }
+            else if (!shiftHeld)
+            {
+                Selection.ClearSelection();
+                _statusMessage = "Cleared selection.";
+            }
+        }
+        else if (Selection.ActiveObjectId.HasValue && Scene.GetObject(Selection.ActiveObjectId.Value) is { } activeObj)
+        {
+            switch (Selection.Mode)
+            {
+                case InteractionMode.Vertex:
+                {
+                    int? pickedVert = MeshPicker.PickVertex(
+                        activeObj,
+                        worldToScreen,
+                        _viewportLocalMousePos,
+                        maxPixelDistance: 12.0f,
+                        cameraPos: Camera.Position);
+
+                    if (pickedVert.HasValue)
+                    {
+                        if (shiftHeld)
+                        {
+                            Selection.ToggleSelectVertex(pickedVert.Value);
+                        }
+                        else
+                        {
+                            Selection.SelectSingleVertex(pickedVert.Value);
+                        }
+
+                        _statusMessage = $"Selected Vertex {pickedVert.Value}. Total: {Selection.SelectedVertexIds.Count}.";
+                    }
+                    else if (!shiftHeld)
+                    {
+                        Selection.ClearSelection();
+                    }
+                    break;
+                }
+
+                case InteractionMode.Edge:
+                {
+                    EdgeKey? pickedEdge = MeshPicker.PickEdge(
+                        activeObj,
+                        ray,
+                        worldToScreen,
+                        _viewportLocalMousePos,
+                        maxPixelDistance: 10.0f);
+
+                    if (pickedEdge.HasValue)
+                    {
+                        if (shiftHeld)
+                        {
+                            Selection.ToggleSelectEdge(pickedEdge.Value);
+                        }
+                        else
+                        {
+                            Selection.SelectSingleEdge(pickedEdge.Value);
+                        }
+
+                        _statusMessage = $"Selected Edge ({pickedEdge.Value.VMin}, {pickedEdge.Value.VMax}). Total: {Selection.SelectedEdges.Count}.";
+                    }
+                    else if (!shiftHeld)
+                    {
+                        Selection.ClearSelection();
+                    }
+                    break;
+                }
+
+                case InteractionMode.Face:
+                {
+                    FaceHit? pickedFace = MeshPicker.PickFace(activeObj, ray, ignoreBackfaces: true);
+                    if (pickedFace.HasValue)
+                    {
+                        if (shiftHeld)
+                        {
+                            Selection.ToggleSelectFace(pickedFace.Value.FaceId);
+                        }
+                        else
+                        {
+                            Selection.SelectSingleFace(pickedFace.Value.FaceId);
+                        }
+
+                        _statusMessage = $"Selected Face {pickedFace.Value.FaceId}. Total: {Selection.SelectedFaceIds.Count}.";
+                    }
+                    else if (!shiftHeld)
+                    {
+                        Selection.ClearSelection();
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    private void UpdateViewportCameraInput(float dt, Vector2 viewportSize)
+    {
+        ImGuiIOPtr io = ImGui.GetIO();
+        Vector2 mouseDelta = Raylib.GetMouseDelta();
+
+        bool rmbDown = Raylib.IsMouseButtonDown(MouseButton.Right);
+        bool mmbDown = Raylib.IsMouseButtonDown(MouseButton.Middle);
+        bool lmbDown = Raylib.IsMouseButtonDown(MouseButton.Left);
+        bool altDown = Raylib.IsKeyDown(KeyboardKey.LeftAlt) || Raylib.IsKeyDown(KeyboardKey.RightAlt);
+        bool shiftDown = Raylib.IsKeyDown(KeyboardKey.LeftShift) || Raylib.IsKeyDown(KeyboardKey.RightShift);
+        bool ctrlDown = Raylib.IsKeyDown(KeyboardKey.LeftControl) || Raylib.IsKeyDown(KeyboardKey.RightControl);
+
+        // 1. Free-Fly Mode (Right Mouse Held in Viewport)
+        if (rmbDown)
+        {
+            Vector3 moveInput = Vector3.Zero;
+            if (Raylib.IsKeyDown(KeyboardKey.D)) moveInput.X += 1.0f;
+            if (Raylib.IsKeyDown(KeyboardKey.A)) moveInput.X -= 1.0f;
+            if (Raylib.IsKeyDown(KeyboardKey.E) || Raylib.IsKeyDown(KeyboardKey.Space)) moveInput.Y += 1.0f;
+            if (Raylib.IsKeyDown(KeyboardKey.Q) || Raylib.IsKeyDown(KeyboardKey.LeftControl)) moveInput.Y -= 1.0f;
+            if (Raylib.IsKeyDown(KeyboardKey.W)) moveInput.Z += 1.0f;
+            if (Raylib.IsKeyDown(KeyboardKey.S)) moveInput.Z -= 1.0f;
+
+            if (moveInput.LengthSquared() > 1.0f)
+            {
+                moveInput = Vector3.Normalize(moveInput);
+            }
+
+            Camera.UpdateFreeFly(moveInput, mouseDelta, dt, shiftDown);
+            return;
+        }
+
+        // 2. Orbit (Alt + Left Mouse Drag) or Middle Mouse Drag in Perspective without Shift
+        if (altDown && lmbDown && mouseDelta.LengthSquared() > 0.0f)
+        {
+            Camera.Orbit(mouseDelta);
+            return;
+        }
+
+        // 3. Pan (Middle Mouse Drag in Ortho, or Shift + Middle Mouse Drag, or Middle Mouse Drag)
+        if (mmbDown && mouseDelta.LengthSquared() > 0.0f)
+        {
+            if (Camera.ProjectionMode == ViewportProjectionMode.Perspective && !shiftDown && ctrlDown)
+            {
+                Camera.Orbit(mouseDelta);
+            }
+            else
+            {
+                Camera.Pan(mouseDelta, viewportSize);
+            }
+            return;
+        }
+
+        // 4. Scroll Wheel Zoom (when hovering viewport)
+        if (_isViewportHovered)
+        {
+            float wheel = Raylib.GetMouseWheelMove();
+            if (MathF.Abs(wheel) > 1e-4f)
+            {
+                Camera.Zoom(wheel);
+            }
+        }
+
+        // 5. Camera View Hotkeys when not typing text
+        if (!io.WantTextInput && (_isViewportHovered || _isViewportFocused))
+        {
+            if (Raylib.IsKeyPressed(KeyboardKey.Kp5) || (!ctrlDown && !altDown && Raylib.IsKeyPressed(KeyboardKey.V)))
+            {
+                Camera.TogglePerspectiveOrtho();
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.Kp1) || (altDown && Raylib.IsKeyPressed(KeyboardKey.Z)))
+            {
+                Camera.SetProjectionMode(ViewportProjectionMode.OrthoZ, invertAxis: ctrlDown);
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.Kp3) || (altDown && Raylib.IsKeyPressed(KeyboardKey.X)))
+            {
+                Camera.SetProjectionMode(ViewportProjectionMode.OrthoX, invertAxis: ctrlDown);
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.Kp7) || (altDown && Raylib.IsKeyPressed(KeyboardKey.Y)))
+            {
+                Camera.SetProjectionMode(ViewportProjectionMode.OrthoY, invertAxis: ctrlDown);
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.Home) || (!ctrlDown && !altDown && Raylib.IsKeyPressed(KeyboardKey.F)))
+            {
+                Camera.FrameTarget(Vector3.Zero, 5.0f);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Draws a 3D orientation axis compass in the top-right corner of the viewport showing +X (Right), +Y (Up), +Z (Away).
+    /// </summary>
+    private void DrawViewportAxisCompassOverlay(Vector2 viewportMin, Vector2 viewportSize)
+    {
+        ImDrawListPtr drawList = ImGui.GetWindowDrawList();
+        Vector2 center = new(viewportMin.X + viewportSize.X - 52.0f, viewportMin.Y + 52.0f);
+        const float axisLen = 32.0f;
+
+        Vector3 right = Camera.GetRight();
+        Vector3 up = Camera.GetUp();
+
+        void DrawAxisIndicator(Vector3 worldAxis, uint color, string label)
+        {
+            float sx = Vector3.Dot(worldAxis, right) * axisLen;
+            float sy = -Vector3.Dot(worldAxis, up) * axisLen;
+            Vector2 endPos = center + new Vector2(sx, sy);
+
+            drawList.AddLine(center, endPos, color, 2.2f);
+            drawList.AddCircleFilled(endPos, 4.5f, color);
+            drawList.AddText(endPos + new Vector2(5.0f, -6.0f), color, label);
+        }
+
+        DrawAxisIndicator(Vector3.UnitX, ImGui.GetColorU32(new Vector4(0.95f, 0.30f, 0.30f, 1.0f)), "+X");
+        DrawAxisIndicator(Vector3.UnitY, ImGui.GetColorU32(new Vector4(0.35f, 0.88f, 0.35f, 1.0f)), "+Y");
+        DrawAxisIndicator(Vector3.UnitZ, ImGui.GetColorU32(new Vector4(0.32f, 0.58f, 0.98f, 1.0f)), "+Z");
+    }
+
+    private void DrawSceneSummaryPanel()
+    {
+        ImGui.Begin("Scene Outliner");
+        ImGui.Text($"Scene: {Scene.Name}");
+        ImGui.TextDisabled($"Objects: {Scene.ObjectCount}");
+        ImGui.Separator();
+
+        for (int i = 0; i < Scene.Objects.Count; i++)
+        {
+            SceneObject obj = Scene.Objects[i];
+            int vertCount = obj.Mesh?.VertexCount ?? 0;
+            int faceCount = obj.Mesh?.FaceCount ?? 0;
+            bool isActiveCreation = PrimitiveController.ActiveObject?.Id == obj.Id;
+            if (isActiveCreation)
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1.0f, 0.85f, 0.3f, 1.0f));
+            }
+            ImGui.BulletText($"{obj.Name} (V:{vertCount}, F:{faceCount}){(isActiveCreation ? " [Active]" : "")}");
+            if (isActiveCreation)
+            {
+                ImGui.PopStyleColor();
+            }
+        }
+
+        ImGui.End();
+    }
+
+    private void DrawStatusBar(ImGuiViewportPtr mainViewport, float height)
+    {
+        Vector2 pos = new(mainViewport.WorkPos.X, mainViewport.WorkPos.Y + mainViewport.WorkSize.Y - height);
+        Vector2 size = new(mainViewport.WorkSize.X, height);
+
+        ImGui.SetNextWindowPos(pos);
+        ImGui.SetNextWindowSize(size);
+        ImGui.SetNextWindowViewport(mainViewport.ID);
+
+        ImGuiWindowFlags flags =
+            ImGuiWindowFlags.NoTitleBar |
+            ImGuiWindowFlags.NoResize |
+            ImGuiWindowFlags.NoMove |
+            ImGuiWindowFlags.NoScrollbar |
+            ImGuiWindowFlags.NoSavedSettings |
+            ImGuiWindowFlags.NoDocking;
+
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 0.0f);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(8.0f, 4.0f));
+        ImGui.Begin("##StatusBar", flags);
+        ImGui.PopStyleVar(2);
+
+        Vector3 camPos = Camera.Position;
+        string selectionInfo = Selection.Mode switch
+        {
+            InteractionMode.Object => $"Sel: {Selection.SelectedObjectIds.Count} obj",
+            InteractionMode.Vertex => $"Sel: {Selection.SelectedVertexIds.Count} vert",
+            InteractionMode.Edge => $"Sel: {Selection.SelectedEdges.Count} edge",
+            InteractionMode.Face => $"Sel: {Selection.SelectedFaceIds.Count} face",
+            _ => ""
+        };
+
+        Vector3? pivot = Selection.GetSelectionPivotWorld(Scene);
+        string pivotInfo = pivot.HasValue ? $"Pivot: ({pivot.Value.X:0.#}, {pivot.Value.Y:0.#}, {pivot.Value.Z:0.#})" : "Pivot: none";
+
+        string displayStatus = ModalController.IsActive
+            ? ModalController.GetStatusReadout()
+            : _statusMessage;
+
+        ImGui.Text($"{displayStatus}  |  [{Selection.Mode}] {selectionInfo} | {pivotInfo}  |  Cam: ({camPos.X:0.0}, {camPos.Y:0.0}, {camPos.Z:0.0})  |  FPS: {Raylib.GetFPS()}");
+
+        ImGui.End();
+    }
+
+    public void Dispose()
+    {
+        _viewportRenderer.Dispose();
+        RlImGui.Shutdown();
+        if (Raylib.IsWindowReady())
+        {
+            Raylib.CloseWindow();
+        }
+    }
+}
