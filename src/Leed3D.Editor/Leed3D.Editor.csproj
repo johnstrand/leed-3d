@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Leed3D.Kernel\Leed3D.Kernel.csproj" />
+    <ProjectReference Include="..\Leed3D.Runtime\Leed3D.Runtime.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Raylib-cs" />
+    <PackageReference Include="ImGui.NET" />
+  </ItemGroup>
+
+</Project>
