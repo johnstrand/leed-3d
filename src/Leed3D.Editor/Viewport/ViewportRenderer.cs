@@ -65,7 +65,10 @@ public sealed class ViewportRenderer : IDisposable
         float gridStep,
         SelectionManager? selection = null,
         TransformGizmo3D? gizmo = null,
-        ModalTransformController? modalController = null)
+        ModalTransformController? modalController = null,
+        int? csgPreviewTargetId = null,
+        int? csgPreviewCutterId = null,
+        Color? csgCutterWireColor = null)
     {
         if (_renderTarget.Id == 0)
         {
@@ -99,7 +102,17 @@ public sealed class ViewportRenderer : IDisposable
                 continue;
             }
 
-            DrawMeshObject(obj, shadingMode, selection);
+            Color? customEdgeColor = null;
+            if (csgCutterWireColor.HasValue && obj.Id == csgPreviewCutterId)
+            {
+                customEdgeColor = csgCutterWireColor.Value;
+            }
+            else if (obj.Id == csgPreviewTargetId)
+            {
+                customEdgeColor = new Color(70, 160, 255, 255); // Highlight Target in blue/cyan
+            }
+
+            DrawMeshObject(obj, shadingMode, selection, customEdgeColor);
         }
 
         // 1. Render active modal operator infinite guide lines
@@ -243,7 +256,7 @@ public sealed class ViewportRenderer : IDisposable
         Rlgl.End();
     }
 
-    private static void DrawMeshObject(SceneObject obj, ViewportShadingMode shadingMode, SelectionManager? selection)
+    private static void DrawMeshObject(SceneObject obj, ViewportShadingMode shadingMode, SelectionManager? selection, Color? customEdgeColor = null)
     {
         EditableMesh mesh = obj.Mesh!;
         Matrix4x4 worldMatrix = obj.Transform.GetLocalMatrix();
@@ -362,7 +375,7 @@ public sealed class ViewportRenderer : IDisposable
         }
 
         // Draw true N-gon topological edges (not internal triangulation diagonals!)
-        if (drawWireframe || isObjectSelected)
+        if (drawWireframe || isObjectSelected || customEdgeColor.HasValue)
         {
             Color defaultEdgeColor = shadingMode == ViewportShadingMode.Wireframe ? PureWireframeColor : WireframeEdgeColor;
             Color objectHighlightColor = new(255, 140, 30, 255);
@@ -389,21 +402,24 @@ public sealed class ViewportRenderer : IDisposable
                 Vector3 pA = Vector3.Transform(vA.Position, worldMatrix);
                 Vector3 pB = Vector3.Transform(vB.Position, worldMatrix);
 
-                Color edgeColor = defaultEdgeColor;
+                Color edgeColor = customEdgeColor ?? defaultEdgeColor;
 
-                if (isObjectSelected)
+                if (!customEdgeColor.HasValue)
                 {
-                    edgeColor = objectHighlightColor;
-                }
-                else if (isEditModeActive)
-                {
-                    if (selection!.Mode == InteractionMode.Edge && selection.SelectedEdges.Contains(edgeKey))
+                    if (isObjectSelected)
                     {
-                        edgeColor = selectedSubEdgeColor;
+                        edgeColor = objectHighlightColor;
                     }
-                    else if (selection!.Mode == InteractionMode.Face && selectedFaceBoundaryEdges is not null && selectedFaceBoundaryEdges.Contains(edgeKey))
+                    else if (isEditModeActive)
                     {
-                        edgeColor = selectedSubEdgeColor;
+                        if (selection!.Mode == InteractionMode.Edge && selection.SelectedEdges.Contains(edgeKey))
+                        {
+                            edgeColor = selectedSubEdgeColor;
+                        }
+                        else if (selection!.Mode == InteractionMode.Face && selectedFaceBoundaryEdges is not null && selectedFaceBoundaryEdges.Contains(edgeKey))
+                        {
+                            edgeColor = selectedSubEdgeColor;
+                        }
                     }
                 }
 

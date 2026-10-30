@@ -1,4 +1,5 @@
 using System.Numerics;
+using Leed3D.Kernel.Csg;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Math;
 using Leed3D.Kernel.Modifiers;
@@ -382,5 +383,152 @@ public sealed class InteractiveEditControllerTests
 
         undo.Undo(scene);
         Assert.Equal(initialObjCount, scene.ObjectCount);
+    }
+
+    [Fact]
+    public void ExecuteCsgBoolean_SubtractDoorwayBox_CarvesWallAndSupportsUndoRedo()
+    {
+        var scene = new EditorScene("CSG Test");
+        var wallMesh = PrimitiveGenerator.CreateBox(new Vector3(10f, 4f, 0.5f));
+        SceneObject wallObj = scene.AddMeshObject("Wall", wallMesh, new Vector3(0f, 2f, 0f));
+
+        var doorMesh = PrimitiveGenerator.CreateBox(new Vector3(2f, 2.5f, 2f));
+        SceneObject doorObj = scene.AddMeshObject("DoorCutter", doorMesh, new Vector3(0f, 1.25f, 0f));
+
+        var selection = new SelectionManager();
+        selection.SelectSingleObject(wallObj.Id);
+        selection.ToggleSelectObject(doorObj.Id);
+        // Active object is the cutter (doorObj)
+        selection.ActiveObjectId = doorObj.Id;
+
+        var undo = new UndoRedoStack();
+        var controller = new InteractiveEditController();
+
+        int initialWallFaceCount = wallObj.Mesh!.FaceCount;
+        Assert.Equal(2, scene.ObjectCount);
+
+        // Execute Subtract with deleteCutter = true
+        bool success = controller.ExecuteCsgBoolean(scene, selection, CsgOperation.Subtract, deleteCutter: true, undo);
+        Assert.True(success);
+
+        // Door cutter should be removed, leaving 1 object in scene
+        Assert.Equal(1, scene.ObjectCount);
+        SceneObject updatedWall = scene.GetObject(wallObj.Id)!;
+        Assert.NotNull(updatedWall);
+        // Wall face count should have changed (door cutout has jambs and U-shaped walls)
+        Assert.True(updatedWall.Mesh!.FaceCount > initialWallFaceCount);
+
+        // Undo restores door cutter and original uncarved wall
+        Assert.True(undo.CanUndo);
+        undo.Undo(scene);
+
+        Assert.Equal(2, scene.ObjectCount);
+        SceneObject restoredDoor = scene.GetObject(doorObj.Id)!;
+        Assert.NotNull(restoredDoor);
+        SceneObject restoredWall = scene.GetObject(wallObj.Id)!;
+        Assert.Equal(initialWallFaceCount, restoredWall.Mesh!.FaceCount);
+
+        // Redo re-executes subtraction
+        Assert.True(undo.CanRedo);
+        undo.Redo(scene);
+
+        Assert.Equal(1, scene.ObjectCount);
+        SceneObject redoneWall = scene.GetObject(wallObj.Id)!;
+        Assert.True(redoneWall.Mesh!.FaceCount > initialWallFaceCount);
+    }
+
+    [Fact]
+    public void ExecuteCsgBoolean_UnionAndIntersect_ModifyMeshesAndSupportUndo()
+    {
+        // 1. Union test
+        var sceneUnion = new EditorScene("Union Test");
+        var boxA = PrimitiveGenerator.CreateBox(new Vector3(4f, 4f, 4f));
+        SceneObject objA = sceneUnion.AddMeshObject("BoxA", boxA, Vector3.Zero);
+        var boxB = PrimitiveGenerator.CreateBox(new Vector3(4f, 4f, 4f));
+        SceneObject objB = sceneUnion.AddMeshObject("BoxB", boxB, new Vector3(2f, 0f, 0f));
+
+        var selUnion = new SelectionManager();
+        selUnion.SelectSingleObject(objA.Id);
+        selUnion.ToggleSelectObject(objB.Id);
+        selUnion.ActiveObjectId = objA.Id;
+
+        var undoUnion = new UndoRedoStack();
+        var controller = new InteractiveEditController();
+
+        bool unionSuccess = controller.ExecuteCsgBoolean(sceneUnion, selUnion, CsgOperation.Union, deleteCutter: true, undoUnion);
+        Assert.True(unionSuccess);
+        Assert.Equal(1, sceneUnion.ObjectCount);
+
+        undoUnion.Undo(sceneUnion);
+        Assert.Equal(2, sceneUnion.ObjectCount);
+
+        // 2. Intersect test
+        var sceneIntersect = new EditorScene("Intersect Test");
+        var cube1 = PrimitiveGenerator.CreateBox(new Vector3(4f, 4f, 4f));
+        SceneObject targetObj = sceneIntersect.AddMeshObject("Target", cube1, Vector3.Zero);
+        var cube2 = PrimitiveGenerator.CreateBox(new Vector3(4f, 4f, 4f));
+        SceneObject cutterObj = sceneIntersect.AddMeshObject("Cutter", cube2, new Vector3(2f, 2f, 2f));
+
+        var selIntersect = new SelectionManager();
+        selIntersect.SelectSingleObject(targetObj.Id);
+        selIntersect.ToggleSelectObject(cutterObj.Id);
+        selIntersect.ActiveObjectId = targetObj.Id;
+
+        var undoIntersect = new UndoRedoStack();
+        bool intersectSuccess = controller.ExecuteCsgBoolean(sceneIntersect, selIntersect, CsgOperation.Intersect, deleteCutter: true, undoIntersect);
+        Assert.True(intersectSuccess);
+        Assert.Equal(1, sceneIntersect.ObjectCount);
+        // Intersect of 4x4x4 cube at (0,0,0) and (2,2,2) is a 2x2x2 cube (6 faces, 8 vertices)
+        SceneObject intersectedResult = sceneIntersect.GetObject(targetObj.Id)!;
+        Assert.Equal(6, intersectedResult.Mesh!.FaceCount);
+        Assert.Equal(8, intersectedResult.Mesh!.VertexCount);
+
+        undoIntersect.Undo(sceneIntersect);
+        Assert.Equal(2, sceneIntersect.ObjectCount);
+    }
+
+    [Fact]
+    public void ExecuteCarve_OverlappingMeshes_SubractsFromOverlappingTargets()
+    {
+        var scene = new EditorScene("Carve Test");
+        // Wall 1
+        var wall1 = PrimitiveGenerator.CreateBox(new Vector3(10f, 4f, 0.5f));
+        SceneObject wallObj1 = scene.AddMeshObject("Wall1", wall1, new Vector3(0f, 2f, 0f));
+
+        // Wall 2 (far away, should not be touched by carve)
+        var wall2 = PrimitiveGenerator.CreateBox(new Vector3(10f, 4f, 0.5f));
+        SceneObject wallObj2 = scene.AddMeshObject("Wall2", wall2, new Vector3(50f, 2f, 0f));
+
+        // Cutter positioned only intersecting Wall 1
+        var cutterMesh = PrimitiveGenerator.CreateBox(new Vector3(2f, 2.5f, 2f));
+        SceneObject cutterObj = scene.AddMeshObject("Cutter", cutterMesh, new Vector3(0f, 1.25f, 0f));
+
+        var selection = new SelectionManager();
+        // Select ONLY the cutter
+        selection.SelectSingleObject(cutterObj.Id);
+
+        var undo = new UndoRedoStack();
+        var controller = new InteractiveEditController();
+
+        int initialWall1FaceCount = wallObj1.Mesh!.FaceCount;
+        int initialWall2FaceCount = wallObj2.Mesh!.FaceCount;
+
+        bool success = controller.ExecuteCarve(scene, selection, deleteCutter: true, undo);
+        Assert.True(success);
+
+        // Cutter was deleted; 2 walls remain
+        Assert.Equal(2, scene.ObjectCount);
+        SceneObject resWall1 = scene.GetObject(wallObj1.Id)!;
+        SceneObject resWall2 = scene.GetObject(wallObj2.Id)!;
+
+        // Wall 1 was carved
+        Assert.True(resWall1.Mesh!.FaceCount > initialWall1FaceCount);
+        // Wall 2 was untouched
+        Assert.Equal(initialWall2FaceCount, resWall2.Mesh!.FaceCount);
+
+        // Undo restores cutter and original Wall 1
+        undo.Undo(scene);
+        Assert.Equal(3, scene.ObjectCount);
+        Assert.Equal(initialWall1FaceCount, scene.GetObject(wallObj1.Id)!.Mesh!.FaceCount);
     }
 }

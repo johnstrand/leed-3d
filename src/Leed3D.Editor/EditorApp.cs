@@ -2,6 +2,7 @@ using System.Numerics;
 using ImGuiNET;
 using Leed3D.Editor.UI;
 using Leed3D.Editor.Viewport;
+using Leed3D.Kernel.Csg;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Gizmos;
 using Leed3D.Kernel.Math;
@@ -76,6 +77,12 @@ public sealed class EditorApp : IDisposable
     private Vector3 _radialArrayPivot = Vector3.Zero;
     private float _radialArrayAngle = 360.0f;
 
+    // CSG Boolean parameters & preview state
+    public bool CsgDeleteCutter { get; set; } = true;
+    public int? CsgPreviewTargetId { get; set; }
+    public int? CsgPreviewCutterId { get; set; }
+    public Color? CsgCutterWireColor { get; set; }
+
     public EditorApp()
     {
         PrimitiveController = new PrimitiveCreationController(Scene, UndoStack);
@@ -109,7 +116,17 @@ public sealed class EditorApp : IDisposable
             HandleGlobalShortcuts();
 
             // Render 3D scene into offscreen RenderTexture2D before drawing ImGui
-            _viewportRenderer.RenderScene(Scene, Camera, ShadingMode, CurrentGridStep, Selection, Gizmo, ModalController);
+            _viewportRenderer.RenderScene(
+                Scene,
+                Camera,
+                ShadingMode,
+                CurrentGridStep,
+                Selection,
+                Gizmo,
+                ModalController,
+                CsgPreviewTargetId,
+                CsgPreviewCutterId,
+                CsgCutterWireColor);
 
             Raylib.BeginDrawing();
             Raylib.ClearBackground(new Color(20, 22, 25, 255));
@@ -163,6 +180,7 @@ public sealed class EditorApp : IDisposable
 
         DrawViewportWindow(dt);
         DrawSceneSummaryPanel();
+        DrawCsgPanel();
         DrawStatusBar(mainViewport, statusBarHeight);
     }
 
@@ -217,6 +235,25 @@ public sealed class EditorApp : IDisposable
                 UndoStack.Redo(Scene);
                 PrimitiveController.Dismiss();
             }
+
+            ImGui.Separator();
+            if (ImGui.MenuItem("CSG Union", "Ctrl+=", false, Selection.Mode == InteractionMode.Object && Selection.SelectedObjectIds.Count >= 2))
+            {
+                ExecuteCsgUnion();
+            }
+            if (ImGui.MenuItem("CSG Subtract / Carve", "Ctrl+-", false, Selection.Mode == InteractionMode.Object && Selection.SelectedObjectIds.Count >= 2))
+            {
+                ExecuteCsgSubtract();
+            }
+            if (ImGui.MenuItem("CSG Intersect", "Ctrl+8", false, Selection.Mode == InteractionMode.Object && Selection.SelectedObjectIds.Count >= 2))
+            {
+                ExecuteCsgIntersect();
+            }
+            if (ImGui.MenuItem("TrenchBroom Carve Overlapping", "Ctrl+Shift+C", false, Selection.Mode == InteractionMode.Object && Selection.HasSelection))
+            {
+                ExecuteCsgCarve();
+            }
+
             ImGui.EndMenu();
         }
 
@@ -370,6 +407,9 @@ public sealed class EditorApp : IDisposable
             drawList.AddRect(min, max, 0xEEFFA020, 0.0f, ImDrawFlags.None, 1.5f);
             drawList.PopClipRect();
         }
+
+        // Reset hover preview for next frame if not re-hovered by buttons
+        ClearCsgPreview();
 
         // Interactive "Adjust Last Operation" overlay popup in bottom-left corner of viewport
         if (PrimitiveController.IsActive)
@@ -623,6 +663,51 @@ public sealed class EditorApp : IDisposable
             if (ImGui.Button("Radial Array...")) ShortcutHandler.OpenRadialArrayPopupRequested = true;
             ImGui.SameLine();
             if (ImGui.Button("Delete (Del)")) EditController.ExecuteDeleteObjects(Scene, Selection, UndoStack);
+
+            ImGui.SameLine();
+            ImGui.TextDisabled("| CSG:");
+            ImGui.SameLine();
+            bool csgAvailable = Selection.SelectedObjectIds.Count >= 2;
+            if (!csgAvailable) ImGui.BeginDisabled();
+            if (ImGui.Button("Union (Ctrl+=)"))
+            {
+                ExecuteCsgUnion();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                SetCsgPreview(new Color(60, 220, 80, 255));
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Subtract (Ctrl+-)"))
+            {
+                ExecuteCsgSubtract();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                SetCsgPreview(new Color(240, 50, 50, 255));
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Intersect (Ctrl+8)"))
+            {
+                ExecuteCsgIntersect();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                SetCsgPreview(new Color(50, 220, 240, 255));
+            }
+            if (!csgAvailable) ImGui.EndDisabled();
+
+            ImGui.SameLine();
+            if (!Selection.HasSelection) ImGui.BeginDisabled();
+            if (ImGui.Button("Carve (Ctrl+Shift+C)"))
+            {
+                ExecuteCsgCarve();
+            }
+            if (ImGui.IsItemHovered())
+            {
+                SetCsgPreview(new Color(240, 50, 50, 255));
+            }
+            if (!Selection.HasSelection) ImGui.EndDisabled();
 
             ImGui.SameLine();
             ImGui.TextDisabled("| Add:");
@@ -1422,6 +1507,143 @@ public sealed class EditorApp : IDisposable
         ImGui.End();
     }
 
+    private void DrawCsgPanel()
+    {
+        ImGui.Begin("CSG Booleans");
+
+        if (Selection.Mode != InteractionMode.Object)
+        {
+            ImGui.TextDisabled("Switch to Object Mode (Tab) to use CSG Booleans.");
+            ImGui.End();
+            return;
+        }
+
+        int selCount = Selection.SelectedObjectIds.Count;
+        int? primaryId = Selection.ActiveObjectId ?? (selCount > 0 ? Selection.SelectedObjectIds.First() : null);
+        SceneObject? primaryObj = primaryId.HasValue ? Scene.GetObject(primaryId.Value) : null;
+        int? secondaryId = selCount >= 2 ? Selection.SelectedObjectIds.FirstOrDefault(id => id != primaryId) : null;
+        SceneObject? secondaryObj = secondaryId.HasValue ? Scene.GetObject(secondaryId.Value) : null;
+
+        string targetName = primaryObj != null ? primaryObj.Name : "(None)";
+        string cutterName = secondaryObj != null ? secondaryObj.Name : "(None)";
+
+        ImGui.Text("CSG Pair Assignment:");
+        ImGui.BulletText($"Target (A): {targetName}");
+        ImGui.BulletText($"Cutter (B): {cutterName}");
+        ImGui.Separator();
+
+        bool deleteCutter = CsgDeleteCutter;
+        if (ImGui.Checkbox("Delete Cutter Object After Boolean", ref deleteCutter))
+        {
+            CsgDeleteCutter = deleteCutter;
+        }
+
+        ImGui.Separator();
+        ImGui.TextDisabled("Operations:");
+
+        bool csgReady = selCount >= 2;
+        if (!csgReady) ImGui.BeginDisabled();
+
+        if (ImGui.Button("Union (A ∪ B)##CsgUnion", new Vector2(-1, 0)))
+        {
+            ExecuteCsgUnion();
+        }
+        if (ImGui.IsItemHovered())
+        {
+            SetCsgPreview(new Color(60, 220, 80, 255));
+        }
+
+        if (ImGui.Button("Subtract / Carve (A - B)##CsgSubtract", new Vector2(-1, 0)))
+        {
+            ExecuteCsgSubtract();
+        }
+        if (ImGui.IsItemHovered())
+        {
+            SetCsgPreview(new Color(240, 50, 50, 255));
+        }
+
+        if (ImGui.Button("Intersect (A ∩ B)##CsgIntersect", new Vector2(-1, 0)))
+        {
+            ExecuteCsgIntersect();
+        }
+        if (ImGui.IsItemHovered())
+        {
+            SetCsgPreview(new Color(50, 220, 240, 255));
+        }
+
+        if (!csgReady) ImGui.EndDisabled();
+
+        ImGui.Separator();
+        ImGui.TextDisabled("TrenchBroom-Style Carve:");
+        if (!Selection.HasSelection) ImGui.BeginDisabled();
+        if (ImGui.Button("Carve Overlapping Meshes##CsgCarve", new Vector2(-1, 0)))
+        {
+            ExecuteCsgCarve();
+        }
+        if (ImGui.IsItemHovered())
+        {
+            SetCsgPreview(new Color(240, 50, 50, 255));
+        }
+        if (!Selection.HasSelection) ImGui.EndDisabled();
+
+        ImGui.End();
+    }
+
+    public void ExecuteCsgUnion()
+    {
+        if (EditController.ExecuteCsgBoolean(Scene, Selection, CsgOperation.Union, CsgDeleteCutter, UndoStack))
+        {
+            StatusMessage = "CSG Union completed.";
+            ClearCsgPreview();
+        }
+    }
+
+    public void ExecuteCsgSubtract()
+    {
+        if (EditController.ExecuteCsgBoolean(Scene, Selection, CsgOperation.Subtract, CsgDeleteCutter, UndoStack))
+        {
+            StatusMessage = "CSG Subtract / Carve completed.";
+            ClearCsgPreview();
+        }
+    }
+
+    public void ExecuteCsgIntersect()
+    {
+        if (EditController.ExecuteCsgBoolean(Scene, Selection, CsgOperation.Intersect, CsgDeleteCutter, UndoStack))
+        {
+            StatusMessage = "CSG Intersect completed.";
+            ClearCsgPreview();
+        }
+    }
+
+    public void ExecuteCsgCarve()
+    {
+        if (EditController.ExecuteCarve(Scene, Selection, CsgDeleteCutter, UndoStack))
+        {
+            StatusMessage = "TrenchBroom Carve completed.";
+            ClearCsgPreview();
+        }
+    }
+
+    public void SetCsgPreview(Color cutterWireColor)
+    {
+        if (Selection.Mode != InteractionMode.Object) return;
+
+        int? primaryId = Selection.ActiveObjectId ?? (Selection.SelectedObjectIds.Count > 0 ? Selection.SelectedObjectIds.First() : null);
+        int? secondaryId = Selection.SelectedObjectIds.Count >= 2 ? Selection.SelectedObjectIds.FirstOrDefault(id => id != primaryId) : null;
+
+        CsgPreviewTargetId = primaryId;
+        CsgPreviewCutterId = secondaryId ?? primaryId;
+        CsgCutterWireColor = cutterWireColor;
+    }
+
+    public void ClearCsgPreview()
+    {
+        CsgPreviewTargetId = null;
+        CsgPreviewCutterId = null;
+        CsgCutterWireColor = null;
+    }
+
     private void DrawStatusBar(ImGuiViewportPtr mainViewport, float height)
     {
         Vector2 pos = new(mainViewport.WorkPos.X, mainViewport.WorkPos.Y + mainViewport.WorkSize.Y - height);
@@ -1880,6 +2102,23 @@ public sealed class EditorApp : IDisposable
                 if (ImGui.MenuItem("Radial Array..."))
                 {
                     ShortcutHandler.OpenRadialArrayPopupRequested = true;
+                }
+                ImGui.Separator();
+                if (ImGui.MenuItem("CSG Union", "Ctrl+=", false, Selection.SelectedObjectIds.Count >= 2))
+                {
+                    ExecuteCsgUnion();
+                }
+                if (ImGui.MenuItem("CSG Subtract / Carve", "Ctrl+-", false, Selection.SelectedObjectIds.Count >= 2))
+                {
+                    ExecuteCsgSubtract();
+                }
+                if (ImGui.MenuItem("CSG Intersect", "Ctrl+8", false, Selection.SelectedObjectIds.Count >= 2))
+                {
+                    ExecuteCsgIntersect();
+                }
+                if (ImGui.MenuItem("TrenchBroom Carve Overlapping", "Ctrl+Shift+C", false, Selection.HasSelection))
+                {
+                    ExecuteCsgCarve();
                 }
                 ImGui.Separator();
                 if (ImGui.MenuItem("Delete Selected", "Del / X"))

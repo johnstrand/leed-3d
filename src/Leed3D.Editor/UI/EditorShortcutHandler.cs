@@ -395,6 +395,41 @@ public sealed class EditorShortcutHandler
                 _app.StatusMessage = $"Selected all ({_app.Selection.Mode} mode).";
                 return;
             }
+
+            // CSG Boolean Hotkeys (in Object Mode):
+            // Ctrl+= : Union
+            // Ctrl+- : Subtract / Carve
+            // Ctrl+8 : Intersect
+            // Ctrl+Shift+C : TrenchBroom Carve
+            if (_app.Selection.Mode == InteractionMode.Object)
+            {
+                if (ctrl && shift && Raylib.IsKeyPressed(KeyboardKey.C))
+                {
+                    _app.ExecuteCsgCarve();
+                    return;
+                }
+
+                if (ctrl && !shift && !alt)
+                {
+                    if (Raylib.IsKeyPressed(KeyboardKey.Equal) || Raylib.IsKeyPressed(KeyboardKey.KpAdd))
+                    {
+                        _app.ExecuteCsgUnion();
+                        return;
+                    }
+
+                    if (Raylib.IsKeyPressed(KeyboardKey.Minus) || Raylib.IsKeyPressed(KeyboardKey.KpSubtract))
+                    {
+                        _app.ExecuteCsgSubtract();
+                        return;
+                    }
+
+                    if (Raylib.IsKeyPressed(KeyboardKey.Eight) || Raylib.IsKeyPressed(KeyboardKey.KpMultiply))
+                    {
+                        _app.ExecuteCsgIntersect();
+                        return;
+                    }
+                }
+            }
         }
     }
 
