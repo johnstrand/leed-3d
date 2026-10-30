@@ -2,6 +2,7 @@ using System.Numerics;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Math;
 using Leed3D.Kernel.Scene;
+using Leed3D.Kernel.Texturing;
 
 namespace Leed3D.Kernel.Csg;
 
@@ -183,13 +184,13 @@ public static class CsgBooleanEngine
             Vector3 normal = newell / MathF.Sqrt(newellLenSq);
             if (worldVerts.Count == 3 || IsConvexPolygon(worldVerts, normal))
             {
-                polygons.Add(new CsgPolygon(worldVerts, face.MaterialId));
+                polygons.Add(new CsgPolygon(worldVerts, face.MaterialId, face.UvMapping));
             }
             else
             {
                 // Decompose concave face into triangles for exact convex BSP splitting
                 IReadOnlyList<(int V0, int V1, int V2)> tris = PolygonTriangulator.TriangulateFace(face, mesh);
-                Plane3D parentPlane = new CsgPolygon(worldVerts, face.MaterialId).Plane;
+                Plane3D parentPlane = new CsgPolygon(worldVerts, face.MaterialId, face.UvMapping).Plane;
 
                 for (int t = 0; t < tris.Count; t++)
                 {
@@ -209,7 +210,7 @@ public static class CsgBooleanEngine
                     List<Vector3> triVerts = flipWinding ? [p0, p2, p1] : [p0, p1, p2];
                     if (CsgPolygon.ComputeNewellVector(triVerts).LengthSquared() > 1e-12f)
                     {
-                        polygons.Add(new CsgPolygon(triVerts, face.MaterialId, parentPlane));
+                        polygons.Add(new CsgPolygon(triVerts, face.MaterialId, parentPlane, face.UvMapping));
                     }
                 }
             }
@@ -271,7 +272,7 @@ public static class CsgBooleanEngine
                 continue;
             }
 
-            if (TryCreateIndexedPolygon(loop, poly.MaterialId, positions, out IndexedPolygon? indexed) && indexed is not null)
+            if (TryCreateIndexedPolygon(loop, poly.MaterialId, poly.UvMapping, positions, out IndexedPolygon? indexed) && indexed is not null)
             {
                 indexedPolygons.Add(indexed);
             }
@@ -315,7 +316,7 @@ public static class CsgBooleanEngine
                 meshVertIds.Add(meshVertexId);
             }
 
-            mesh.AddFace(meshVertIds, poly.MaterialId);
+            mesh.AddFace(meshVertIds, poly.MaterialId, poly.UvMapping);
         }
 
         mesh.ValidateAndRepair();
@@ -464,6 +465,7 @@ public static class CsgBooleanEngine
     private static bool TryCreateIndexedPolygon(
         List<int> loop,
         string materialId,
+        FaceUvMapping? uvMapping,
         IReadOnlyList<Vector3> positions,
         out IndexedPolygon? polygon)
     {
@@ -491,7 +493,7 @@ public static class CsgBooleanEngine
         centroid /= loop.Count;
 
         Plane3D plane = Plane3D.CreateFromPointAndNormal(centroid, normal);
-        polygon = new IndexedPolygon(loop, materialId, plane, newellLen);
+        polygon = new IndexedPolygon(loop, materialId, uvMapping?.Clone(), plane, newellLen);
         return true;
     }
 
@@ -771,7 +773,7 @@ public static class CsgBooleanEngine
             return false;
         }
 
-        merged = new IndexedPolygon(cycle, polyA.MaterialId, polyA.Plane, newellLen);
+        merged = new IndexedPolygon(cycle, polyA.MaterialId, polyA.UvMapping?.Clone(), polyA.Plane, newellLen);
         return true;
     }
 
@@ -823,13 +825,15 @@ public static class CsgBooleanEngine
     {
         public List<int> Loop { get; set; }
         public string MaterialId { get; }
+        public FaceUvMapping? UvMapping { get; }
         public Plane3D Plane { get; }
         public float NewellLength { get; }
 
-        public IndexedPolygon(List<int> loop, string materialId, Plane3D plane, float newellLength)
+        public IndexedPolygon(List<int> loop, string materialId, FaceUvMapping? uvMapping, Plane3D plane, float newellLength)
         {
             Loop = loop;
             MaterialId = materialId;
+            UvMapping = uvMapping;
             Plane = plane;
             NewellLength = newellLength;
         }

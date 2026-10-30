@@ -1,5 +1,6 @@
 using System.Numerics;
 using Leed3D.Kernel.Math;
+using Leed3D.Kernel.Texturing;
 
 namespace Leed3D.Kernel.Geometry;
 
@@ -33,12 +34,14 @@ public sealed class PolygonFace
     public int Id { get; }
     public List<int> VertexIds { get; }
     public string MaterialId { get; set; }
+    public FaceUvMapping UvMapping { get; set; }
 
-    public PolygonFace(int id, IEnumerable<int> vertexIds, string materialId = DefaultMaterialId)
+    public PolygonFace(int id, IEnumerable<int> vertexIds, string materialId = DefaultMaterialId, FaceUvMapping? uvMapping = null)
     {
         Id = id;
         VertexIds = new List<int>(vertexIds);
         MaterialId = string.IsNullOrWhiteSpace(materialId) ? DefaultMaterialId : materialId;
+        UvMapping = uvMapping ?? new FaceUvMapping();
     }
 
     /// <summary>
@@ -109,7 +112,7 @@ public sealed class PolygonFace
 
     public PolygonFace Clone()
     {
-        return new PolygonFace(Id, VertexIds, MaterialId);
+        return new PolygonFace(Id, VertexIds, MaterialId, UvMapping.Clone());
     }
 }
 
@@ -160,7 +163,7 @@ public sealed class EditableMesh
     /// <summary>
     /// Adds an N-gon polygon face with the given ordered vertex ID loop and returns its stable unique ID.
     /// </summary>
-    public int AddFace(IEnumerable<int> vertexIds, string materialId = PolygonFace.DefaultMaterialId)
+    public int AddFace(IEnumerable<int> vertexIds, string materialId = PolygonFace.DefaultMaterialId, FaceUvMapping? uvMapping = null)
     {
         ArgumentNullException.ThrowIfNull(vertexIds);
 
@@ -179,18 +182,24 @@ public sealed class EditableMesh
         }
 
         int id = _nextFaceId++;
-        AddFaceWithId(id, idList, materialId);
+        AddFaceWithId(id, idList, materialId, uvMapping);
         return id;
     }
 
-    internal void AddFaceWithId(int id, IEnumerable<int> vertexIds, string materialId = PolygonFace.DefaultMaterialId)
+    internal void AddFaceWithId(int id, IEnumerable<int> vertexIds, string materialId = PolygonFace.DefaultMaterialId, FaceUvMapping? uvMapping = null)
     {
         if (id >= _nextFaceId)
         {
             _nextFaceId = id + 1;
         }
 
-        var face = new PolygonFace(id, vertexIds, materialId);
+        var face = new PolygonFace(id, vertexIds, materialId, uvMapping?.Clone());
+        if (uvMapping is null || !uvMapping.TextureLock)
+        {
+            Vector3 normal = face.ComputeNormal(this);
+            (face.UvMapping.UAxis, face.UvMapping.VAxis) = UvProjectionEngine.GetDefaultAxesForNormal(normal);
+        }
+
         _facesById[id] = face;
         _faces.Add(face);
         InvalidateTopology();
@@ -214,6 +223,17 @@ public sealed class EditableMesh
         }
 
         vertex.Position = newPosition;
+
+        for (int i = 0; i < _faces.Count; i++)
+        {
+            PolygonFace face = _faces[i];
+            if (!face.UvMapping.TextureLock && face.VertexIds.Contains(id))
+            {
+                Vector3 normal = face.ComputeNormal(this);
+                (face.UvMapping.UAxis, face.UvMapping.VAxis) = UvProjectionEngine.GetDefaultAxesForNormal(normal);
+            }
+        }
+
         return true;
     }
 
