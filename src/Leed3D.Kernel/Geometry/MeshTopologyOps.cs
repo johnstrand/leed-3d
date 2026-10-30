@@ -5,7 +5,7 @@ using Leed3D.Kernel.Scene;
 namespace Leed3D.Kernel.Geometry;
 
 /// <summary>
-/// Headless vertex and edge topology construction and editing operations for <see cref="EditableMesh"/>.
+/// Headless vertex, edge, and face topology construction and editing operations for <see cref="EditableMesh"/>.
 /// </summary>
 public static class MeshTopologyOps
 {
@@ -1097,5 +1097,803 @@ public static class MeshTopologyOps
         }
 
         return PolygonFace.DefaultMaterialId;
+    }
+
+    /// <summary>
+    /// Extrudes (push-pulls) a single N-gon face or a contiguous/multi-face selection.
+    /// Duplicates referenced vertices offset by <paramref name="customOffset"/> or <c>avgNormal * distance</c>,
+    /// rewires the selected <see cref="PolygonFace"/>s to the new vertex IDs so they keep the same FaceIds,
+    /// and creates quad wall faces along all boundary half-edges of the selection.
+    /// Returns the extruded cap face IDs.
+    /// </summary>
+    public static IReadOnlyList<int> ExtrudeFaces(
+        EditableMesh mesh,
+        IReadOnlyCollection<int> faceIds,
+        float distance,
+        Vector3? customOffset = null)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+        ArgumentNullException.ThrowIfNull(faceIds);
+
+        if (faceIds.Count == 0)
+        {
+            return [];
+        }
+
+        var selectedFaces = new List<PolygonFace>(faceIds.Count);
+        var selectedFaceSet = new HashSet<int>();
+
+        foreach (int fId in faceIds)
+        {
+            if (selectedFaceSet.Add(fId))
+            {
+                PolygonFace? face = mesh.GetFace(fId);
+                if (face is not null && face.VertexIds.Count >= 3)
+                {
+                    selectedFaces.Add(face);
+                }
+                else
+                {
+                    selectedFaceSet.Remove(fId);
+                }
+            }
+        }
+
+        if (selectedFaces.Count == 0)
+        {
+            return [];
+        }
+
+        // 1. Compute average normal of selected faces (or use customOffset if provided)
+        Vector3 offset;
+        if (customOffset.HasValue)
+        {
+            offset = customOffset.Value;
+        }
+        else
+        {
+            Vector3 normalSum = Vector3.Zero;
+            for (int i = 0; i < selectedFaces.Count; i++)
+            {
+                normalSum += selectedFaces[i].ComputeNormal(mesh);
+            }
+
+            Vector3 avgNormal = normalSum.LengthSquared() > 1e-12f
+                ? Vector3.Normalize(normalSum)
+                : selectedFaces[0].ComputeNormal(mesh);
+
+            offset = avgNormal * distance;
+        }
+
+        // 2. Identify all boundary half-edges of the selected faces via TopologyGraph
+        TopologyGraph topology = mesh.GetTopology();
+        var boundaryHalfEdges = CollectBoundaryHalfEdges(topology, selectedFaces, selectedFaceSet);
+
+        // 3. Duplicate all vertices referenced by selectedFaces and offset by offset
+        var duplicatedVertices = new Dictionary<int, int>();
+        var extrudedCapFaceIds = new List<int>(selectedFaces.Count);
+
+        for (int i = 0; i < selectedFaces.Count; i++)
+        {
+            PolygonFace face = selectedFaces[i];
+            extrudedCapFaceIds.Add(face.Id);
+            List<int> vIds = face.VertexIds;
+
+            for (int j = 0; j < vIds.Count; j++)
+            {
+                int oldVId = vIds[j];
+                if (!duplicatedVertices.TryGetValue(oldVId, out int newVId))
+                {
+                    Vector3 oldPos = mesh.GetVertex(oldVId)!.Position;
+                    newVId = mesh.AddVertex(oldPos + offset);
+                    duplicatedVertices[oldVId] = newVId;
+                }
+
+                // 4. Rewire the selected PolygonFace to use the new duplicated vertex IDs
+                vIds[j] = newVId;
+            }
+        }
+
+        // 5. For each boundary half-edge (u -> v), create a new quad wall [u, v, v_new, u_new]
+        for (int i = 0; i < boundaryHalfEdges.Count; i++)
+        {
+            (int u, int v, string materialId) = boundaryHalfEdges[i];
+            int uNew = duplicatedVertices[u];
+            int vNew = duplicatedVertices[v];
+            mesh.AddFace([u, v, vNew, uNew], materialId);
+        }
+
+        mesh.ValidateAndRepair();
+        return extrudedCapFaceIds;
+    }
+
+    /// <summary>
+    /// Insets each target face (or connected region of faces when <paramref name="individualFaces"/> is false)
+    /// by computing inward miter vectors in the face plane (<c>bisector / sin(halfAngle)</c>, clamped),
+    /// creating quad border faces around the perimeter, and rewiring the central <see cref="PolygonFace"/>(s)
+    /// to the inner vertices so they stay selected.
+    /// Returns the inset inner face IDs.
+    /// </summary>
+    public static IReadOnlyList<int> InsetFaces(
+        EditableMesh mesh,
+        IReadOnlyCollection<int> faceIds,
+        float thickness,
+        float depth = 0f,
+        bool individualFaces = false)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+        ArgumentNullException.ThrowIfNull(faceIds);
+
+        if (faceIds.Count == 0)
+        {
+            return [];
+        }
+
+        var selectedFaces = new List<PolygonFace>(faceIds.Count);
+        var selectedFaceSet = new HashSet<int>();
+
+        foreach (int fId in faceIds)
+        {
+            if (selectedFaceSet.Add(fId))
+            {
+                PolygonFace? face = mesh.GetFace(fId);
+                if (face is not null && face.VertexIds.Count >= 3)
+                {
+                    selectedFaces.Add(face);
+                }
+                else
+                {
+                    selectedFaceSet.Remove(fId);
+                }
+            }
+        }
+
+        if (selectedFaces.Count == 0)
+        {
+            return [];
+        }
+
+        var resultFaceIds = new List<int>(selectedFaces.Count);
+        for (int i = 0; i < selectedFaces.Count; i++)
+        {
+            resultFaceIds.Add(selectedFaces[i].Id);
+        }
+
+        if (individualFaces || selectedFaces.Count == 1)
+        {
+            for (int i = 0; i < selectedFaces.Count; i++)
+            {
+                InsetSingleFace(mesh, selectedFaces[i], thickness, depth);
+            }
+
+            mesh.ValidateAndRepair();
+            return resultFaceIds;
+        }
+
+        // Group selected faces into connected components across shared edges
+        TopologyGraph topology = mesh.GetTopology();
+        var visited = new HashSet<int>();
+
+        for (int i = 0; i < selectedFaces.Count; i++)
+        {
+            PolygonFace startFace = selectedFaces[i];
+            if (!visited.Add(startFace.Id))
+            {
+                continue;
+            }
+
+            var component = new List<PolygonFace> { startFace };
+            var componentSet = new HashSet<int> { startFace.Id };
+            var queue = new Queue<int>();
+            queue.Enqueue(startFace.Id);
+
+            while (queue.Count > 0)
+            {
+                int currId = queue.Dequeue();
+                IReadOnlyList<int> adjIds = topology.GetFaceAdjacentFaces(currId);
+                for (int a = 0; a < adjIds.Count; a++)
+                {
+                    int neighborId = adjIds[a];
+                    if (selectedFaceSet.Contains(neighborId) && visited.Add(neighborId))
+                    {
+                        PolygonFace? neighborFace = mesh.GetFace(neighborId);
+                        if (neighborFace is not null)
+                        {
+                            component.Add(neighborFace);
+                            componentSet.Add(neighborId);
+                            queue.Enqueue(neighborId);
+                        }
+                    }
+                }
+            }
+
+            if (component.Count == 1)
+            {
+                InsetSingleFace(mesh, component[0], thickness, depth);
+            }
+            else
+            {
+                InsetConnectedRegion(mesh, topology, component, componentSet, thickness, depth);
+            }
+        }
+
+        mesh.ValidateAndRepair();
+        return resultFaceIds;
+    }
+
+    /// <summary>
+    /// Removes the specified faces from <paramref name="mesh"/> and runs <see cref="EditableMesh.ValidateAndRepair"/>
+    /// to clean up any vertices that become unreferenced.
+    /// </summary>
+    public static void DeleteFaces(EditableMesh mesh, IReadOnlyCollection<int> faceIds)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+        ArgumentNullException.ThrowIfNull(faceIds);
+
+        if (faceIds.Count == 0)
+        {
+            return;
+        }
+
+        bool removedAny = false;
+        foreach (int faceId in faceIds)
+        {
+            if (mesh.RemoveFace(faceId))
+            {
+                removedAny = true;
+            }
+        }
+
+        if (removedAny)
+        {
+            mesh.ValidateAndRepair();
+        }
+    }
+
+    /// <summary>
+    /// Merges coplanar/contiguous selected faces into a single outer boundary N-gon face by walking
+    /// the boundary half-edge loop. Returns the new merged face ID, or null if the selection does not
+    /// form a valid single boundary loop.
+    /// </summary>
+    public static int? DissolveFaces(EditableMesh mesh, IReadOnlyCollection<int> faceIds)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+        ArgumentNullException.ThrowIfNull(faceIds);
+
+        if (faceIds.Count == 0)
+        {
+            return null;
+        }
+
+        var selectedFaces = new List<PolygonFace>(faceIds.Count);
+        var selectedFaceSet = new HashSet<int>();
+
+        foreach (int fId in faceIds)
+        {
+            if (selectedFaceSet.Add(fId))
+            {
+                PolygonFace? face = mesh.GetFace(fId);
+                if (face is not null && face.VertexIds.Count >= 3)
+                {
+                    selectedFaces.Add(face);
+                }
+                else
+                {
+                    selectedFaceSet.Remove(fId);
+                }
+            }
+        }
+
+        if (selectedFaces.Count == 0)
+        {
+            return null;
+        }
+
+        if (selectedFaces.Count == 1)
+        {
+            return selectedFaces[0].Id;
+        }
+
+        TopologyGraph topology = mesh.GetTopology();
+        var boundaryHalfEdges = CollectBoundaryHalfEdges(topology, selectedFaces, selectedFaceSet);
+        if (boundaryHalfEdges.Count < 3)
+        {
+            return null;
+        }
+
+        // Walk the boundary half-edge loop
+        var outgoingByOrigin = new Dictionary<int, List<int>>();
+        for (int i = 0; i < boundaryHalfEdges.Count; i++)
+        {
+            (int u, _, _) = boundaryHalfEdges[i];
+            if (!outgoingByOrigin.TryGetValue(u, out List<int>? list))
+            {
+                list = [];
+                outgoingByOrigin[u] = list;
+            }
+            list.Add(i);
+        }
+
+        var usedHalfEdge = new bool[boundaryHalfEdges.Count];
+        var mergedLoop = new List<int>(boundaryHalfEdges.Count);
+
+        int startEdgeIdx = 0;
+        int startVertex = boundaryHalfEdges[startEdgeIdx].U;
+        int currentEdgeIdx = startEdgeIdx;
+
+        while (true)
+        {
+            usedHalfEdge[currentEdgeIdx] = true;
+            (int u, int v, _) = boundaryHalfEdges[currentEdgeIdx];
+            mergedLoop.Add(u);
+
+            if (v == startVertex)
+            {
+                break;
+            }
+
+            if (!outgoingByOrigin.TryGetValue(v, out List<int>? candidates))
+            {
+                return null;
+            }
+
+            int nextEdgeIdx = -1;
+            for (int c = 0; c < candidates.Count; c++)
+            {
+                int candIdx = candidates[c];
+                if (!usedHalfEdge[candIdx])
+                {
+                    nextEdgeIdx = candIdx;
+                    break;
+                }
+            }
+
+            if (nextEdgeIdx < 0)
+            {
+                return null;
+            }
+
+            currentEdgeIdx = nextEdgeIdx;
+        }
+
+        // Ensure all boundary half-edges belong to this single outer loop
+        if (mergedLoop.Count != boundaryHalfEdges.Count || mergedLoop.Count < 3)
+        {
+            return null;
+        }
+
+        string materialId = selectedFaces[0].MaterialId;
+
+        for (int i = 0; i < selectedFaces.Count; i++)
+        {
+            mesh.RemoveFace(selectedFaces[i].Id);
+        }
+
+        int newFaceId = mesh.AddFace(mergedLoop, materialId);
+        mesh.ValidateAndRepair();
+        return newFaceId;
+    }
+
+    /// <summary>
+    /// Reverses the vertex winding order on the specified faces.
+    /// </summary>
+    public static void FlipSelectedFaces(EditableMesh mesh, IReadOnlyCollection<int> faceIds)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+        ArgumentNullException.ThrowIfNull(faceIds);
+
+        if (faceIds.Count == 0)
+        {
+            return;
+        }
+
+        mesh.FlipNormals(faceIds);
+    }
+
+    /// <summary>
+    /// Recalculates consistent face normals across each connected component of faces in <paramref name="mesh"/>:
+    /// 1. Runs BFS across shared edges ensuring adjacent faces traverse every shared edge in opposite directions.
+    /// 2. Computes the signed volume / outward divergence of the component.
+    /// 3. Flips the component if needed so normals point outward (<paramref name="insideOut"/> = false)
+    ///    or inward (<paramref name="insideOut"/> = true).
+    /// </summary>
+    public static void RecalculateNormals(EditableMesh mesh, bool insideOut = false)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+
+        if (mesh.FaceCount == 0)
+        {
+            return;
+        }
+
+        TopologyGraph topology = mesh.GetTopology();
+        var visited = new HashSet<int>();
+
+        foreach (PolygonFace seedFace in mesh.Faces)
+        {
+            if (!visited.Add(seedFace.Id))
+            {
+                continue;
+            }
+
+            var componentFaces = new List<PolygonFace> { seedFace };
+            var queue = new Queue<PolygonFace>();
+            queue.Enqueue(seedFace);
+
+            // 1. BFS across shared edges to enforce opposite half-edge traversal between adjacent faces
+            while (queue.Count > 0)
+            {
+                PolygonFace current = queue.Dequeue();
+                IReadOnlyList<int> neighborIds = topology.GetFaceAdjacentFaces(current.Id);
+
+                for (int i = 0; i < neighborIds.Count; i++)
+                {
+                    int neighborId = neighborIds[i];
+                    if (!visited.Add(neighborId))
+                    {
+                        continue;
+                    }
+
+                    PolygonFace? neighbor = mesh.GetFace(neighborId);
+                    if (neighbor is null)
+                    {
+                        continue;
+                    }
+
+                    if (SharesSameEdgeDirection(current, neighbor))
+                    {
+                        neighbor.VertexIds.Reverse();
+                    }
+
+                    componentFaces.Add(neighbor);
+                    queue.Enqueue(neighbor);
+                }
+            }
+
+            // 2. Compute component centroid and signed volume / outward divergence:
+            //    Sum(Dot(faceCentroid - componentCenter, faceNormal) * faceArea)
+            Vector3 componentCenter = ComputeComponentVertexCentroid(mesh, componentFaces);
+            float signedVolume = 0.0f;
+
+            for (int i = 0; i < componentFaces.Count; i++)
+            {
+                PolygonFace face = componentFaces[i];
+                Vector3 faceCentroid = face.ComputeCentroid(mesh);
+                Vector3 faceNormal = face.ComputeNormal(mesh);
+                float faceArea = ComputeFaceArea(mesh, face);
+
+                signedVolume += Vector3.Dot(faceCentroid - componentCenter, faceNormal) * faceArea;
+            }
+
+            // Fallback for single flat face where (faceCentroid - componentCenter) is near zero
+            if (MathF.Abs(signedVolume) <= 1e-7f)
+            {
+                for (int i = 0; i < componentFaces.Count; i++)
+                {
+                    PolygonFace face = componentFaces[i];
+                    Vector3 faceCentroid = face.ComputeCentroid(mesh);
+                    Vector3 faceNormal = face.ComputeNormal(mesh);
+                    float faceArea = ComputeFaceArea(mesh, face);
+
+                    signedVolume += Vector3.Dot(faceCentroid, faceNormal) * faceArea;
+                }
+            }
+
+            // 3. Flip component if signedVolume sign disagrees with insideOut target
+            bool shouldFlip = (!insideOut && signedVolume < -1e-7f) ||
+                              (insideOut && signedVolume > 1e-7f);
+
+            if (shouldFlip)
+            {
+                for (int i = 0; i < componentFaces.Count; i++)
+                {
+                    componentFaces[i].VertexIds.Reverse();
+                }
+            }
+        }
+
+        mesh.InvalidateTopology();
+    }
+
+    private static List<(int U, int V, string MaterialId)> CollectBoundaryHalfEdges(
+        TopologyGraph topology,
+        List<PolygonFace> selectedFaces,
+        HashSet<int> selectedFaceSet)
+    {
+        var boundaryHalfEdges = new List<(int U, int V, string MaterialId)>();
+
+        for (int i = 0; i < selectedFaces.Count; i++)
+        {
+            PolygonFace face = selectedFaces[i];
+            IReadOnlyList<int> heIds = topology.GetFaceHalfEdgeIds(face.Id);
+
+            for (int h = 0; h < heIds.Count; h++)
+            {
+                DirectedHalfEdge he = topology.HalfEdges[heIds[h]];
+                bool isSharedInterior = false;
+
+                if (he.TwinHalfEdgeId.HasValue)
+                {
+                    DirectedHalfEdge twin = topology.HalfEdges[he.TwinHalfEdgeId.Value];
+                    if (selectedFaceSet.Contains(twin.FaceId))
+                    {
+                        isSharedInterior = true;
+                    }
+                }
+
+                if (!isSharedInterior)
+                {
+                    TopologyEdge? topoEdge = topology.GetEdge(he.EdgeKey);
+                    if (topoEdge is not null)
+                    {
+                        for (int f = 0; f < topoEdge.IncidentFaceIds.Count; f++)
+                        {
+                            int incFaceId = topoEdge.IncidentFaceIds[f];
+                            if (incFaceId != face.Id && selectedFaceSet.Contains(incFaceId))
+                            {
+                                isSharedInterior = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (!isSharedInterior)
+                {
+                    boundaryHalfEdges.Add((he.OriginVertexId, he.TargetVertexId, face.MaterialId));
+                }
+            }
+        }
+
+        return boundaryHalfEdges;
+    }
+
+    private static void InsetSingleFace(
+        EditableMesh mesh,
+        PolygonFace face,
+        float thickness,
+        float depth)
+    {
+        List<int> vIds = face.VertexIds;
+        int n = vIds.Count;
+        if (n < 3)
+        {
+            return;
+        }
+
+        Vector3 faceNormal = face.ComputeNormal(mesh);
+        var positions = new Vector3[n];
+        for (int i = 0; i < n; i++)
+        {
+            positions[i] = mesh.GetVertex(vIds[i])!.Position;
+        }
+
+        var innerIds = new int[n];
+        for (int i = 0; i < n; i++)
+        {
+            Vector3 pPrev = positions[(i - 1 + n) % n];
+            Vector3 pCurr = positions[i];
+            Vector3 pNext = positions[(i + 1) % n];
+
+            Vector3 miter = ComputeInwardMiter(pPrev, pCurr, pNext, faceNormal);
+            Vector3 innerPos = pCurr + (miter * thickness) + (faceNormal * depth);
+            innerIds[i] = mesh.AddVertex(innerPos);
+        }
+
+        string materialId = face.MaterialId;
+        var originalIds = new int[n];
+        vIds.CopyTo(originalIds);
+
+        // Rewire central face to [v_0_inner, v_1_inner, ...]
+        for (int i = 0; i < n; i++)
+        {
+            vIds[i] = innerIds[i];
+        }
+
+        // Create quad border faces [v_i, v_{next}, v_{next}_inner, v_i_inner] around perimeter
+        for (int i = 0; i < n; i++)
+        {
+            int next = (i + 1) % n;
+            mesh.AddFace([originalIds[i], originalIds[next], innerIds[next], innerIds[i]], materialId);
+        }
+    }
+
+    private static void InsetConnectedRegion(
+        EditableMesh mesh,
+        TopologyGraph topology,
+        List<PolygonFace> component,
+        HashSet<int> componentSet,
+        float thickness,
+        float depth)
+    {
+        Vector3 normalSum = Vector3.Zero;
+        for (int i = 0; i < component.Count; i++)
+        {
+            normalSum += component[i].ComputeNormal(mesh);
+        }
+
+        Vector3 regionNormal = normalSum.LengthSquared() > 1e-12f
+            ? Vector3.Normalize(normalSum)
+            : component[0].ComputeNormal(mesh);
+
+        var boundaryHalfEdges = CollectBoundaryHalfEdges(topology, component, componentSet);
+
+        // Map boundary vertex -> (prevBoundaryVertex, nextBoundaryVertex)
+        var prevBoundaryMap = new Dictionary<int, int>();
+        var nextBoundaryMap = new Dictionary<int, int>();
+        for (int i = 0; i < boundaryHalfEdges.Count; i++)
+        {
+            (int u, int v, _) = boundaryHalfEdges[i];
+            nextBoundaryMap[u] = v;
+            prevBoundaryMap[v] = u;
+        }
+
+        var innerVertexMap = new Dictionary<int, int>();
+
+        for (int i = 0; i < component.Count; i++)
+        {
+            List<int> vIds = component[i].VertexIds;
+            for (int j = 0; j < vIds.Count; j++)
+            {
+                int vId = vIds[j];
+                if (innerVertexMap.ContainsKey(vId))
+                {
+                    continue;
+                }
+
+                Vector3 pCurr = mesh.GetVertex(vId)!.Position;
+                Vector3 innerPos;
+
+                if (prevBoundaryMap.TryGetValue(vId, out int prevId) &&
+                    nextBoundaryMap.TryGetValue(vId, out int nextId))
+                {
+                    Vector3 pPrev = mesh.GetVertex(prevId)!.Position;
+                    Vector3 pNext = mesh.GetVertex(nextId)!.Position;
+                    Vector3 miter = ComputeInwardMiter(pPrev, pCurr, pNext, regionNormal);
+                    innerPos = pCurr + (miter * thickness) + (regionNormal * depth);
+                }
+                else
+                {
+                    innerPos = pCurr + (regionNormal * depth);
+                }
+
+                innerVertexMap[vId] = mesh.AddVertex(innerPos);
+            }
+        }
+
+        // Rewire region faces to inner vertices
+        for (int i = 0; i < component.Count; i++)
+        {
+            List<int> vIds = component[i].VertexIds;
+            for (int j = 0; j < vIds.Count; j++)
+            {
+                vIds[j] = innerVertexMap[vIds[j]];
+            }
+        }
+
+        // Create quad border faces along perimeter
+        for (int i = 0; i < boundaryHalfEdges.Count; i++)
+        {
+            (int u, int v, string materialId) = boundaryHalfEdges[i];
+            mesh.AddFace([u, v, innerVertexMap[v], innerVertexMap[u]], materialId);
+        }
+    }
+
+    private static Vector3 ComputeInwardMiter(
+        Vector3 pPrev,
+        Vector3 pCurr,
+        Vector3 pNext,
+        Vector3 faceNormal)
+    {
+        Vector3 edgeIn = pCurr - pPrev;
+        Vector3 edgeOut = pNext - pCurr;
+
+        Vector3 dirIn = edgeIn.LengthSquared() > 1e-12f ? Vector3.Normalize(edgeIn) : Vector3.UnitX;
+        Vector3 dirOut = edgeOut.LengthSquared() > 1e-12f ? Vector3.Normalize(edgeOut) : Vector3.UnitX;
+
+        Vector3 nIn = Vector3.Cross(faceNormal, dirIn);
+        if (nIn.LengthSquared() > 1e-12f)
+        {
+            nIn = Vector3.Normalize(nIn);
+        }
+
+        Vector3 nOut = Vector3.Cross(faceNormal, dirOut);
+        if (nOut.LengthSquared() > 1e-12f)
+        {
+            nOut = Vector3.Normalize(nOut);
+        }
+
+        Vector3 sumN = nIn + nOut;
+        if (sumN.LengthSquared() <= 1e-8f)
+        {
+            return nOut;
+        }
+
+        Vector3 bisector = Vector3.Normalize(sumN);
+        float sinHalfAngle = Vector3.Dot(bisector, nIn);
+        float clampedSin = System.Math.Max(MathF.Abs(sinHalfAngle), 0.2f);
+        return bisector / clampedSin;
+    }
+
+    private static bool SharesSameEdgeDirection(PolygonFace faceA, PolygonFace faceB)
+    {
+        List<int> idsA = faceA.VertexIds;
+        List<int> idsB = faceB.VertexIds;
+        int countA = idsA.Count;
+        int countB = idsB.Count;
+
+        for (int i = 0; i < countA; i++)
+        {
+            int uA = idsA[i];
+            int vA = idsA[(i + 1) % countA];
+            var edgeA = new EdgeKey(uA, vA);
+
+            for (int j = 0; j < countB; j++)
+            {
+                int uB = idsB[j];
+                int vB = idsB[(j + 1) % countB];
+                if (new EdgeKey(uB, vB) == edgeA)
+                {
+                    return uA == uB && vA == vB;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static Vector3 ComputeComponentVertexCentroid(EditableMesh mesh, List<PolygonFace> componentFaces)
+    {
+        var seenVertices = new HashSet<int>();
+        Vector3 sum = Vector3.Zero;
+
+        for (int i = 0; i < componentFaces.Count; i++)
+        {
+            List<int> vIds = componentFaces[i].VertexIds;
+            for (int j = 0; j < vIds.Count; j++)
+            {
+                int vId = vIds[j];
+                if (seenVertices.Add(vId))
+                {
+                    MeshVertex? v = mesh.GetVertex(vId);
+                    if (v is not null)
+                    {
+                        sum += v.Position;
+                    }
+                }
+            }
+        }
+
+        return seenVertices.Count > 0 ? sum / seenVertices.Count : Vector3.Zero;
+    }
+
+    private static float ComputeFaceArea(EditableMesh mesh, PolygonFace face)
+    {
+        List<int> vIds = face.VertexIds;
+        int count = vIds.Count;
+        if (count < 3)
+        {
+            return 0.0f;
+        }
+
+        Vector3 newell = Vector3.Zero;
+        for (int i = 0; i < count; i++)
+        {
+            MeshVertex? currVert = mesh.GetVertex(vIds[i]);
+            MeshVertex? nextVert = mesh.GetVertex(vIds[(i + 1) % count]);
+            if (currVert is null || nextVert is null)
+            {
+                continue;
+            }
+
+            Vector3 curr = currVert.Position;
+            Vector3 next = nextVert.Position;
+
+            newell.X += (curr.Y - next.Y) * (curr.Z + next.Z);
+            newell.Y += (curr.Z - next.Z) * (curr.X + next.X);
+            newell.Z += (curr.X - next.X) * (curr.Y + next.Y);
+        }
+
+        return 0.5f * newell.Length();
     }
 }
