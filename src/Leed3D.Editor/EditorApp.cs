@@ -5,9 +5,11 @@ using Leed3D.Editor.Viewport;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Gizmos;
 using Leed3D.Kernel.Math;
+using Leed3D.Kernel.Modifiers;
 using Leed3D.Kernel.Primitives;
 using Leed3D.Kernel.Scene;
 using Leed3D.Kernel.Selection;
+using Leed3D.Kernel.Tools;
 using Leed3D.Kernel.Viewport;
 using Raylib_cs;
 using Color = Raylib_cs.Color;
@@ -29,6 +31,8 @@ public sealed class EditorApp : IDisposable
     public UndoRedoStack UndoStack { get; } = new();
     public EditorCamera Camera { get; } = new();
     public PrimitiveCreationController PrimitiveController { get; }
+    public InteractiveEditController EditController { get; } = new();
+    public EditorShortcutHandler ShortcutHandler { get; }
     public SelectionManager Selection { get; } = new();
     public TransformGizmo3D Gizmo { get; } = new();
     public TransformApplicator Applicator { get; } = new();
@@ -39,6 +43,8 @@ public sealed class EditorApp : IDisposable
     public float CurrentGridStep { get; set; } = 1.0f;
     public bool SnapAngleEnabled { get; set; } = true;
     public float CurrentAngleStepDegrees { get; set; } = 15.0f;
+
+    public string StatusMessage { get => _statusMessage; set => _statusMessage = value; }
 
     private bool _isViewportHovered;
     private bool _isViewportFocused;
@@ -54,9 +60,26 @@ public sealed class EditorApp : IDisposable
 
     private string _statusMessage = "Ready — Click primitive buttons to add, Shift+A for quick-add menu, RMB+WASD to fly.";
 
+    // Subdivide, Weld, Mirror & Array parameters
+    private int _subdivideCuts = 1;
+    private float _weldThreshold = 0.01f;
+    private Axis3D _mirrorAxis = Axis3D.X;
+    private float _mirrorPlaneCoord;
+    private bool _mirrorKeepOriginal = true;
+    private float _mirrorWeldThreshold = 0.001f;
+
+    private int _linearArrayCount = 3;
+    private Vector3 _linearArrayOffset = new(2.0f, 0.0f, 0.0f);
+
+    private int _radialArrayCount = 6;
+    private Axis3D _radialArrayAxis = Axis3D.Y;
+    private Vector3 _radialArrayPivot = Vector3.Zero;
+    private float _radialArrayAngle = 360.0f;
+
     public EditorApp()
     {
         PrimitiveController = new PrimitiveCreationController(Scene, UndoStack);
+        ShortcutHandler = new EditorShortcutHandler(this);
         InitializeDefaultStarterScene();
     }
 
@@ -101,220 +124,7 @@ public sealed class EditorApp : IDisposable
 
     private void HandleGlobalShortcuts()
     {
-        ImGuiIOPtr io = ImGui.GetIO();
-        if (io.WantTextInput)
-        {
-            return;
-        }
-
-        bool ctrl = Raylib.IsKeyDown(KeyboardKey.LeftControl) || Raylib.IsKeyDown(KeyboardKey.RightControl);
-        bool shift = Raylib.IsKeyDown(KeyboardKey.LeftShift) || Raylib.IsKeyDown(KeyboardKey.RightShift);
-        bool alt = Raylib.IsKeyDown(KeyboardKey.LeftAlt) || Raylib.IsKeyDown(KeyboardKey.RightAlt);
-        bool flying = Raylib.IsMouseButtonDown(MouseButton.Right);
-
-        // Active Modal Transform Operator Shortcuts: Cancel (Esc/RMB), Confirm (Enter/LMB), Axis Locks (X/Y/Z, Shift+X/Y/Z), Numeric Input
-        if (ModalController.IsActive)
-        {
-            if (Raylib.IsKeyPressed(KeyboardKey.Escape) || Raylib.IsMouseButtonPressed(MouseButton.Right))
-            {
-                ModalController.Cancel(Scene, UndoStack);
-                _statusMessage = "Cancelled modal transform.";
-                return;
-            }
-
-            if (Raylib.IsKeyPressed(KeyboardKey.Enter) || Raylib.IsKeyPressed(KeyboardKey.KpEnter) || Raylib.IsMouseButtonPressed(MouseButton.Left))
-            {
-                ModalController.Confirm(Scene, UndoStack);
-                PrimitiveController.Dismiss();
-                _statusMessage = "Committed modal transform.";
-                return;
-            }
-
-            if (Raylib.IsKeyPressed(KeyboardKey.X))
-            {
-                ModalController.HandleAxisKey('X', shift, Scene);
-            }
-            else if (Raylib.IsKeyPressed(KeyboardKey.Y))
-            {
-                ModalController.HandleAxisKey('Y', shift, Scene);
-            }
-            else if (Raylib.IsKeyPressed(KeyboardKey.Z))
-            {
-                ModalController.HandleAxisKey('Z', shift, Scene);
-            }
-
-            HandleModalNumericInput();
-            _statusMessage = ModalController.GetStatusReadout();
-            return;
-        }
-
-        // Active Gizmo Drag Shortcuts: Esc/RightClick cancel, X/Y/Z or Shift+X/Y/Z constraint override
-        if (Gizmo.IsDragging)
-        {
-            if (Raylib.IsKeyPressed(KeyboardKey.Escape) || Raylib.IsMouseButtonPressed(MouseButton.Right))
-            {
-                Gizmo.CancelDrag();
-                Applicator.CancelSession(Scene, UndoStack);
-                _statusMessage = "Cancelled gizmo transform.";
-                return;
-            }
-
-            if (Raylib.IsKeyPressed(KeyboardKey.X))
-            {
-                Gizmo.SetConstraintOverride(shift ? GizmoAxisConstraint.YZ : GizmoAxisConstraint.X);
-            }
-            else if (Raylib.IsKeyPressed(KeyboardKey.Y))
-            {
-                Gizmo.SetConstraintOverride(shift ? GizmoAxisConstraint.XZ : GizmoAxisConstraint.Y);
-            }
-            else if (Raylib.IsKeyPressed(KeyboardKey.Z))
-            {
-                Gizmo.SetConstraintOverride(shift ? GizmoAxisConstraint.XY : GizmoAxisConstraint.Z);
-            }
-
-            return;
-        }
-
-        // Undo (Ctrl+Z) & Redo (Ctrl+Y or Ctrl+Shift+Z)
-        if (ctrl && !shift && Raylib.IsKeyPressed(KeyboardKey.Z))
-        {
-            if (UndoStack.Undo(Scene))
-            {
-                PrimitiveController.Dismiss();
-                _statusMessage = "Undid last action.";
-            }
-        }
-        else if ((ctrl && Raylib.IsKeyPressed(KeyboardKey.Y)) ||
-                 (ctrl && shift && Raylib.IsKeyPressed(KeyboardKey.Z)))
-        {
-            if (UndoStack.Redo(Scene))
-            {
-                PrimitiveController.Dismiss();
-                _statusMessage = "Redid action.";
-            }
-        }
-
-        // Selection, Mode, Modal Operators & Gizmo Tool Shortcuts (when not in free-fly WASD mode)
-        if (!flying)
-        {
-            // Blender-style modal transform operators (G Grab/Move, R Rotate, S Scale)
-            if (!ctrl && !alt && Selection.HasSelection)
-            {
-                if (Raylib.IsKeyPressed(KeyboardKey.G))
-                {
-                    Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, _viewportRenderer.ViewportSize);
-                    if (ModalController.Start(ModalTransformMode.Move, Scene, Selection, ray, Camera.GetForward(), UndoStack))
-                    {
-                        PrimitiveController.Dismiss();
-                        _statusMessage = ModalController.GetStatusReadout();
-                        return;
-                    }
-                }
-                else if (Raylib.IsKeyPressed(KeyboardKey.R))
-                {
-                    Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, _viewportRenderer.ViewportSize);
-                    if (ModalController.Start(ModalTransformMode.Rotate, Scene, Selection, ray, Camera.GetForward(), UndoStack))
-                    {
-                        PrimitiveController.Dismiss();
-                        _statusMessage = ModalController.GetStatusReadout();
-                        return;
-                    }
-                }
-                else if (Raylib.IsKeyPressed(KeyboardKey.S))
-                {
-                    Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, _viewportRenderer.ViewportSize);
-                    if (ModalController.Start(ModalTransformMode.Scale, Scene, Selection, ray, Camera.GetForward(), UndoStack))
-                    {
-                        PrimitiveController.Dismiss();
-                        _statusMessage = ModalController.GetStatusReadout();
-                        return;
-                    }
-                }
-            }
-
-            if (Raylib.IsKeyPressed(KeyboardKey.Tab))
-            {
-                Selection.ToggleObjectEditMode(Scene);
-                _statusMessage = $"Mode: {Selection.Mode}.";
-            }
-            else if (Raylib.IsKeyPressed(KeyboardKey.One))
-            {
-                Selection.SetMode(InteractionMode.Vertex, Scene);
-                _statusMessage = "Vertex Select Mode (1).";
-            }
-            else if (Raylib.IsKeyPressed(KeyboardKey.Two))
-            {
-                Selection.SetMode(InteractionMode.Edge, Scene);
-                _statusMessage = "Edge Select Mode (2).";
-            }
-            else if (Raylib.IsKeyPressed(KeyboardKey.Three))
-            {
-                Selection.SetMode(InteractionMode.Face, Scene);
-                _statusMessage = "Face Select Mode (3).";
-            }
-            else if (!ctrl && !alt && !shift && Raylib.IsKeyPressed(KeyboardKey.W))
-            {
-                Gizmo.ToolMode = GizmoToolMode.Translate;
-                _statusMessage = "Gizmo Tool: Translate (W).";
-            }
-            else if (!ctrl && !alt && !shift && Selection.Mode == InteractionMode.Object && Raylib.IsKeyPressed(KeyboardKey.E))
-            {
-                Gizmo.ToolMode = GizmoToolMode.Rotate;
-                _statusMessage = "Gizmo Tool: Rotate (E).";
-            }
-            else if (!ctrl && !alt && !shift && !Selection.HasSelection && Raylib.IsKeyPressed(KeyboardKey.R))
-            {
-                Gizmo.ToolMode = GizmoToolMode.Scale;
-                _statusMessage = "Gizmo Tool: Scale (R).";
-            }
-            else if (ctrl && Raylib.IsKeyPressed(KeyboardKey.I))
-            {
-                Selection.InvertSelection(Scene);
-                _statusMessage = $"Inverted {Selection.Mode} selection.";
-            }
-            else if (alt && Raylib.IsKeyPressed(KeyboardKey.A))
-            {
-                Selection.ClearSelection();
-                _statusMessage = "Cleared selection (Alt+A).";
-            }
-            else if (!ctrl && !alt && !shift && Raylib.IsKeyPressed(KeyboardKey.A))
-            {
-                Selection.SelectAll(Scene);
-                _statusMessage = $"Selected all ({Selection.Mode} mode).";
-            }
-        }
-    }
-
-    private void HandleModalNumericInput()
-    {
-        if (Raylib.IsKeyPressed(KeyboardKey.Backspace))
-        {
-            ModalController.HandleBackspace(Scene);
-            return;
-        }
-
-        if (Raylib.IsKeyPressed(KeyboardKey.Minus) || Raylib.IsKeyPressed(KeyboardKey.KpSubtract))
-        {
-            ModalController.HandleNumericKey('-', Scene);
-            return;
-        }
-
-        if (Raylib.IsKeyPressed(KeyboardKey.Period) || Raylib.IsKeyPressed(KeyboardKey.KpDecimal))
-        {
-            ModalController.HandleNumericKey('.', Scene);
-            return;
-        }
-
-        for (int i = 0; i <= 9; i++)
-        {
-            KeyboardKey mainKey = (KeyboardKey)((int)KeyboardKey.Zero + i);
-            KeyboardKey kpKey = (KeyboardKey)((int)KeyboardKey.Kp0 + i);
-            if (Raylib.IsKeyPressed(mainKey) || Raylib.IsKeyPressed(kpKey))
-            {
-                ModalController.HandleNumericKey((char)('0' + i), Scene);
-                return;
-            }
-        }
+        ShortcutHandler.HandleShortcuts(_isViewportHovered, _isViewportFocused, _viewportLocalMousePos, _viewportRenderer.ViewportSize);
     }
 
     private void DrawDockspaceAndBars(float dt)
@@ -540,6 +350,7 @@ public sealed class EditorApp : IDisposable
         }
 
         DrawViewportAxisCompassOverlay(_viewportScreenMin, new Vector2(targetW, targetH));
+        DrawViewportHudOverlay(_viewportScreenMin, new Vector2(targetW, targetH));
 
         // Vertex selection overlay (dots / squares) in Vertex mode
         if (Selection.Mode == InteractionMode.Vertex && Selection.ActiveObjectId.HasValue)
@@ -565,6 +376,65 @@ public sealed class EditorApp : IDisposable
         {
             DrawAdjustPrimitiveOverlay(_viewportScreenMin, new Vector2(targetW, targetH));
         }
+        else if (EditController.IsExtrudeActive)
+        {
+            DrawExtrudeOverlay(_viewportScreenMin, new Vector2(targetW, targetH));
+        }
+        else if (EditController.IsInsetActive)
+        {
+            DrawInsetOverlay(_viewportScreenMin, new Vector2(targetW, targetH));
+        }
+
+        // Open requested popups
+        if (ShortcutHandler.OpenContextMenuRequested)
+        {
+            ImGui.OpenPopup("ViewportContextMenu");
+            ShortcutHandler.OpenContextMenuRequested = false;
+        }
+        if (ShortcutHandler.OpenDeletePopupRequested)
+        {
+            ImGui.OpenPopup("DeleteContextMenu");
+            ShortcutHandler.OpenDeletePopupRequested = false;
+        }
+        if (ShortcutHandler.OpenNormalsPopupRequested)
+        {
+            ImGui.OpenPopup("NormalsContextMenu");
+            ShortcutHandler.OpenNormalsPopupRequested = false;
+        }
+        if (ShortcutHandler.OpenWeldPopupRequested)
+        {
+            ImGui.OpenPopup("WeldVerticesPopup");
+            ShortcutHandler.OpenWeldPopupRequested = false;
+        }
+        if (ShortcutHandler.OpenSubdividePopupRequested)
+        {
+            ImGui.OpenPopup("SubdividePopup");
+            ShortcutHandler.OpenSubdividePopupRequested = false;
+        }
+        if (ShortcutHandler.OpenMirrorPopupRequested)
+        {
+            ImGui.OpenPopup("MirrorPopup");
+            ShortcutHandler.OpenMirrorPopupRequested = false;
+        }
+        if (ShortcutHandler.OpenLinearArrayPopupRequested)
+        {
+            ImGui.OpenPopup("LinearArrayPopup");
+            ShortcutHandler.OpenLinearArrayPopupRequested = false;
+        }
+        if (ShortcutHandler.OpenRadialArrayPopupRequested)
+        {
+            ImGui.OpenPopup("RadialArrayPopup");
+            ShortcutHandler.OpenRadialArrayPopupRequested = false;
+        }
+
+        DrawViewportContextMenu();
+        DrawDeleteContextMenu();
+        DrawNormalsContextMenu();
+        DrawWeldVerticesPopup();
+        DrawSubdividePopup();
+        DrawMirrorPopup();
+        DrawLinearArrayPopup();
+        DrawRadialArrayPopup();
 
         if (_isViewportHovered || Raylib.IsMouseButtonDown(MouseButton.Right) || Raylib.IsMouseButtonDown(MouseButton.Middle))
         {
@@ -732,20 +602,96 @@ public sealed class EditorApp : IDisposable
         }
 
         ImGui.SameLine();
-        ImGui.TextDisabled("| Add Primitive:");
+        ImGui.TextDisabled("| Tools:");
         ImGui.SameLine();
 
-        if (ImGui.Button("Plane")) SpawnPrimitive(PrimitiveType.Plane);
-        ImGui.SameLine();
-        if (ImGui.Button("Box")) SpawnPrimitive(PrimitiveType.Box);
-        ImGui.SameLine();
-        if (ImGui.Button("Cylinder")) SpawnPrimitive(PrimitiveType.Cylinder);
-        ImGui.SameLine();
-        if (ImGui.Button("Cone")) SpawnPrimitive(PrimitiveType.Cone);
-        ImGui.SameLine();
-        if (ImGui.Button("Geosphere")) SpawnPrimitive(PrimitiveType.Geosphere);
-        ImGui.SameLine();
-        if (ImGui.Button("Icosahedron")) SpawnPrimitive(PrimitiveType.Icosahedron);
+        if (Selection.Mode == InteractionMode.Object)
+        {
+            if (ImGui.Button("Clone (Shift+D)"))
+            {
+                if (EditController.ExecuteQuickClone(Scene, Selection, UndoStack))
+                {
+                    Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, _viewportRenderer.ViewportSize);
+                    ModalController.Start(ModalTransformMode.Move, Scene, Selection, ray, Camera.GetForward(), UndoStack);
+                }
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Mirror...")) ShortcutHandler.OpenMirrorPopupRequested = true;
+            ImGui.SameLine();
+            if (ImGui.Button("Linear Array...")) ShortcutHandler.OpenLinearArrayPopupRequested = true;
+            ImGui.SameLine();
+            if (ImGui.Button("Radial Array...")) ShortcutHandler.OpenRadialArrayPopupRequested = true;
+            ImGui.SameLine();
+            if (ImGui.Button("Delete (Del)")) EditController.ExecuteDeleteObjects(Scene, Selection, UndoStack);
+
+            ImGui.SameLine();
+            ImGui.TextDisabled("| Add:");
+            ImGui.SameLine();
+            if (ImGui.Button("Plane")) SpawnPrimitive(PrimitiveType.Plane);
+            ImGui.SameLine();
+            if (ImGui.Button("Box")) SpawnPrimitive(PrimitiveType.Box);
+            ImGui.SameLine();
+            if (ImGui.Button("Cylinder")) SpawnPrimitive(PrimitiveType.Cylinder);
+            ImGui.SameLine();
+            if (ImGui.Button("Cone")) SpawnPrimitive(PrimitiveType.Cone);
+            ImGui.SameLine();
+            if (ImGui.Button("Geosphere")) SpawnPrimitive(PrimitiveType.Geosphere);
+            ImGui.SameLine();
+            if (ImGui.Button("Icosahedron")) SpawnPrimitive(PrimitiveType.Icosahedron);
+        }
+        else if (Selection.Mode == InteractionMode.Vertex)
+        {
+            if (ImGui.Button("Connect (J)")) EditController.ExecuteConnectVertices(Scene, Selection, UndoStack);
+            ImGui.SameLine();
+            if (ImGui.Button("Fill Face (F)")) EditController.ExecuteFillFace(Scene, Selection, UndoStack);
+            ImGui.SameLine();
+            if (ImGui.Button("Weld Center (M)")) EditController.ExecuteWeldCenter(Scene, Selection, UndoStack);
+            ImGui.SameLine();
+            if (ImGui.Button("Weld Distance...")) ShortcutHandler.OpenWeldPopupRequested = true;
+            ImGui.SameLine();
+            if (ImGui.Button("Delete (X)")) ShortcutHandler.OpenDeletePopupRequested = true;
+        }
+        else if (Selection.Mode == InteractionMode.Edge)
+        {
+            if (ImGui.Button("Extrude (E)"))
+            {
+                Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, _viewportRenderer.ViewportSize);
+                EditController.StartExtrude(Scene, Selection, ray, Camera.GetForward(), UndoStack);
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Subdivide...")) ShortcutHandler.OpenSubdividePopupRequested = true;
+            ImGui.SameLine();
+            if (ImGui.Button("Fill Face (F)")) EditController.ExecuteFillFace(Scene, Selection, UndoStack);
+            ImGui.SameLine();
+            if (ImGui.Button("Delete (X)")) ShortcutHandler.OpenDeletePopupRequested = true;
+        }
+        else if (Selection.Mode == InteractionMode.Face)
+        {
+            if (ImGui.Button("Extrude (E)"))
+            {
+                Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, _viewportRenderer.ViewportSize);
+                EditController.StartExtrude(Scene, Selection, ray, Camera.GetForward(), UndoStack);
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Inset (I)")) EditController.StartInset(Scene, Selection, ImGui.GetMousePos(), UndoStack);
+            ImGui.SameLine();
+            if (ImGui.Button("Clone (Shift+D)"))
+            {
+                if (EditController.ExecuteQuickClone(Scene, Selection, UndoStack))
+                {
+                    Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, _viewportRenderer.ViewportSize);
+                    ModalController.Start(ModalTransformMode.Move, Scene, Selection, ray, Camera.GetForward(), UndoStack);
+                }
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Dissolve (X)")) EditController.ExecuteDissolveFaces(Scene, Selection, UndoStack);
+            ImGui.SameLine();
+            if (ImGui.Button("Delete (Del)")) EditController.ExecuteDeleteFaces(Scene, Selection, UndoStack);
+            ImGui.SameLine();
+            if (ImGui.Button("Normals (Alt+N)...")) ShortcutHandler.OpenNormalsPopupRequested = true;
+            ImGui.SameLine();
+            if (ImGui.Button("Subdivide...")) ShortcutHandler.OpenSubdividePopupRequested = true;
+        }
 
         ImGui.Separator();
     }
@@ -954,6 +900,50 @@ public sealed class EditorApp : IDisposable
 
     private void UpdateViewportSelectionInput(Vector2 viewportSize)
     {
+        // Active Interactive Edit Controller Drag Handling (Extrude / Inset)
+        if (EditController.IsActive)
+        {
+            if (Raylib.IsMouseButtonPressed(MouseButton.Right) || Raylib.IsKeyPressed(KeyboardKey.Escape))
+            {
+                if (EditController.IsExtrudeActive)
+                    EditController.CancelExtrude(Scene, UndoStack);
+                else if (EditController.IsInsetActive)
+                    EditController.CancelInset(Scene, UndoStack);
+                _statusMessage = "Cancelled operation.";
+                return;
+            }
+
+            if (Raylib.IsMouseButtonPressed(MouseButton.Left) || Raylib.IsKeyPressed(KeyboardKey.Enter) || Raylib.IsKeyPressed(KeyboardKey.KpEnter))
+            {
+                if (EditController.IsExtrudeActive)
+                    EditController.ConfirmExtrude(Scene, UndoStack);
+                else if (EditController.IsInsetActive)
+                    EditController.ConfirmInset(Scene, UndoStack);
+                _statusMessage = "Committed operation.";
+                return;
+            }
+
+            if (EditController.IsExtrudeActive)
+            {
+                Ray3D currentRay = Camera.ScreenPointToRay(_viewportLocalMousePos, viewportSize);
+                bool ctrlHeld = Raylib.IsKeyDown(KeyboardKey.LeftControl) || Raylib.IsKeyDown(KeyboardKey.RightControl);
+                bool snapGrid = ctrlHeld ? !SnapToGridEnabled : SnapToGridEnabled;
+                EditController.UpdateExtrudeRay(Scene, currentRay, snapGrid, CurrentGridStep);
+                _statusMessage = EditController.GetStatusReadout();
+                return;
+            }
+
+            if (EditController.IsInsetActive)
+            {
+                Vector2 mouseScreenPos = ImGui.GetMousePos();
+                bool ctrlHeld = Raylib.IsKeyDown(KeyboardKey.LeftControl) || Raylib.IsKeyDown(KeyboardKey.RightControl);
+                bool snapGrid = ctrlHeld ? !SnapToGridEnabled : SnapToGridEnabled;
+                EditController.UpdateInsetMouse(Scene, mouseScreenPos, snapGrid, CurrentGridStep);
+                _statusMessage = EditController.GetStatusReadout();
+                return;
+            }
+        }
+
         // Active Modal Transform Operator Drag Handling
         if (ModalController.IsActive)
         {
@@ -1036,7 +1026,7 @@ public sealed class EditorApp : IDisposable
 
         // Check if mouse is over adjust primitive overlay window in bottom-left
         bool overAdjustOverlay = false;
-        if (PrimitiveController.IsActive)
+        if (PrimitiveController.IsActive || EditController.IsActive)
         {
             const float overlayWidth = 280.0f;
             const float margin = 12.0f;
@@ -1469,11 +1459,515 @@ public sealed class EditorApp : IDisposable
 
         string displayStatus = ModalController.IsActive
             ? ModalController.GetStatusReadout()
-            : _statusMessage;
+            : EditController.IsActive
+                ? EditController.GetStatusReadout()
+                : _statusMessage;
 
         ImGui.Text($"{displayStatus}  |  [{Selection.Mode}] {selectionInfo} | {pivotInfo}  |  Cam: ({camPos.X:0.0}, {camPos.Y:0.0}, {camPos.Z:0.0})  |  FPS: {Raylib.GetFPS()}");
 
         ImGui.End();
+    }
+
+    private void DrawViewportHudOverlay(Vector2 viewportMin, Vector2 viewportSize)
+    {
+        ImDrawListPtr drawList = ImGui.GetWindowDrawList();
+        Vector2 pos = viewportMin + new Vector2(14.0f, 14.0f);
+
+        // 1. Current Mode Label
+        string modeLabel = Selection.Mode switch
+        {
+            InteractionMode.Object => "OBJECT MODE",
+            InteractionMode.Vertex => "EDIT MODE: VERTEX",
+            InteractionMode.Edge => "EDIT MODE: EDGE",
+            InteractionMode.Face => "EDIT MODE: FACE",
+            _ => "OBJECT"
+        };
+
+        uint modeColor = Selection.Mode == InteractionMode.Object
+            ? 0xFFFFA020  // Cyan/Light Blue
+            : 0xFF20C8FF; // Bright Gold/Orange
+
+        // 2. Active Object & Selection Count
+        string activeName = "None";
+        string summary;
+
+        if (Selection.ActiveObjectId.HasValue && Scene.GetObject(Selection.ActiveObjectId.Value) is { } obj && obj.Mesh is not null)
+        {
+            activeName = obj.Name;
+            int totV = obj.Mesh.VertexCount;
+            int totE = obj.Mesh.GetTopology().Edges.Count;
+            int totF = obj.Mesh.FaceCount;
+            int selV = Selection.SelectedVertexIds.Count;
+            int selE = Selection.SelectedEdges.Count;
+            int selF = Selection.SelectedFaceIds.Count;
+
+            summary = $"Verts: {selV}/{totV} | Edges: {selE}/{totE} | Faces: {selF}/{totF}";
+        }
+        else
+        {
+            summary = $"Selected Objects: {Selection.SelectedObjectIds.Count}/{Scene.ObjectCount}";
+        }
+
+        // 3. Modal Operator Status (G/R/S/E/I)
+        string? modalStatus = null;
+        if (ModalController.IsActive)
+        {
+            modalStatus = $"OPERATOR: {ModalController.Mode.ToString().ToUpper()} ({ModalController.Constraint}) [Enter: Commit | Esc: Cancel]";
+        }
+        else if (EditController.IsExtrudeActive)
+        {
+            modalStatus = $"OPERATOR: EXTRUDE ({EditController.ExtrudeTarget}) [Dist: {EditController.ExtrudeDistance:+0.00;-0.00;0.00}m] [Enter: Commit | Esc: Cancel]";
+        }
+        else if (EditController.IsInsetActive)
+        {
+            modalStatus = $"OPERATOR: INSET [Thick: {EditController.InsetThickness:0.00}m, Depth: {EditController.InsetDepth:0.00}m] [Enter: Commit | Esc: Cancel]";
+        }
+
+        float width = 360.0f;
+        float height = modalStatus is not null ? 68.0f : 48.0f;
+        Vector2 boxMax = pos + new Vector2(width, height);
+
+        drawList.PushClipRect(viewportMin, viewportMin + viewportSize, true);
+        drawList.AddRectFilled(pos, boxMax, 0xDD141619, 5.0f);
+        drawList.AddRect(pos, boxMax, 0xFF353A42, 5.0f, ImDrawFlags.None, 1.0f);
+
+        drawList.AddText(pos + new Vector2(10.0f, 6.0f), modeColor, modeLabel);
+        drawList.AddText(pos + new Vector2(10.0f, 24.0f), 0xFFC8CDD5, $"{activeName} | {summary}");
+
+        if (modalStatus is not null)
+        {
+            drawList.AddText(pos + new Vector2(10.0f, 44.0f), 0xFF30F0FF, modalStatus);
+        }
+        drawList.PopClipRect();
+    }
+
+    private void DrawExtrudeOverlay(Vector2 viewportMin, Vector2 viewportSize)
+    {
+        const float overlayWidth = 280.0f;
+        const float margin = 12.0f;
+
+        Vector2 overlayPos = new(viewportMin.X + margin, viewportMin.Y + viewportSize.Y - 140.0f);
+        ImGui.SetNextWindowPos(overlayPos, ImGuiCond.Always);
+        ImGui.SetNextWindowSize(new Vector2(overlayWidth, 0.0f));
+
+        ImGuiWindowFlags flags =
+            ImGuiWindowFlags.NoMove |
+            ImGuiWindowFlags.NoResize |
+            ImGuiWindowFlags.AlwaysAutoResize |
+            ImGuiWindowFlags.NoSavedSettings;
+
+        ImGui.PushStyleColor(ImGuiCol.WindowBg, new Vector4(0.12f, 0.14f, 0.17f, 0.95f));
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 6.0f);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 1.0f);
+
+        bool open = true;
+        if (ImGui.Begin("Extrude Region###ExtrudeOverlay", ref open, flags))
+        {
+            float dist = EditController.ExtrudeDistance;
+            if (ImGui.DragFloat("Distance", ref dist, 0.05f))
+            {
+                EditController.SetExtrudeDistance(Scene, dist);
+            }
+
+            ImGui.Separator();
+            if (ImGui.Button("Confirm (Enter)", new Vector2(120, 0)))
+            {
+                EditController.ConfirmExtrude(Scene, UndoStack);
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel (Esc)", new Vector2(120, 0)))
+            {
+                EditController.CancelExtrude(Scene, UndoStack);
+            }
+
+            ImGui.End();
+        }
+
+        ImGui.PopStyleVar(2);
+        ImGui.PopStyleColor();
+
+        if (!open)
+        {
+            EditController.CancelExtrude(Scene, UndoStack);
+        }
+    }
+
+    private void DrawInsetOverlay(Vector2 viewportMin, Vector2 viewportSize)
+    {
+        const float overlayWidth = 280.0f;
+        const float margin = 12.0f;
+
+        Vector2 overlayPos = new(viewportMin.X + margin, viewportMin.Y + viewportSize.Y - 190.0f);
+        ImGui.SetNextWindowPos(overlayPos, ImGuiCond.Always);
+        ImGui.SetNextWindowSize(new Vector2(overlayWidth, 0.0f));
+
+        ImGuiWindowFlags flags =
+            ImGuiWindowFlags.NoMove |
+            ImGuiWindowFlags.NoResize |
+            ImGuiWindowFlags.AlwaysAutoResize |
+            ImGuiWindowFlags.NoSavedSettings;
+
+        ImGui.PushStyleColor(ImGuiCol.WindowBg, new Vector4(0.12f, 0.14f, 0.17f, 0.95f));
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 6.0f);
+        ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 1.0f);
+
+        bool open = true;
+        if (ImGui.Begin("Inset Faces###InsetOverlay", ref open, flags))
+        {
+            float thick = EditController.InsetThickness;
+            float depth = EditController.InsetDepth;
+            bool indiv = EditController.InsetIndividual;
+            bool changed = false;
+
+            if (ImGui.DragFloat("Thickness", ref thick, 0.02f, 0.0f, 10.0f)) changed = true;
+            if (ImGui.DragFloat("Depth", ref depth, 0.02f, -10.0f, 10.0f)) changed = true;
+            if (ImGui.Checkbox("Individual Faces", ref indiv)) changed = true;
+
+            if (changed)
+            {
+                EditController.SetInsetParameters(Scene, thick, depth, indiv);
+            }
+
+            ImGui.Separator();
+            if (ImGui.Button("Confirm (Enter)", new Vector2(120, 0)))
+            {
+                EditController.ConfirmInset(Scene, UndoStack);
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel (Esc)", new Vector2(120, 0)))
+            {
+                EditController.CancelInset(Scene, UndoStack);
+            }
+
+            ImGui.End();
+        }
+
+        ImGui.PopStyleVar(2);
+        ImGui.PopStyleColor();
+
+        if (!open)
+        {
+            EditController.CancelInset(Scene, UndoStack);
+        }
+    }
+
+    private void DrawSubdividePopup()
+    {
+        if (ImGui.BeginPopup("SubdividePopup"))
+        {
+            ImGui.TextDisabled("Subdivide Edges");
+            ImGui.Separator();
+            ImGui.SliderInt("Cuts", ref _subdivideCuts, 1, 16);
+            if (ImGui.Button("Apply", new Vector2(100, 0)))
+            {
+                EditController.ExecuteSubdivideEdges(Scene, Selection, _subdivideCuts, UndoStack);
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel", new Vector2(100, 0)))
+            {
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawWeldVerticesPopup()
+    {
+        if (ImGui.BeginPopup("WeldVerticesPopup"))
+        {
+            ImGui.TextDisabled("Weld / Merge Vertices (M)");
+            ImGui.Separator();
+            if (ImGui.Button("Weld at Center", new Vector2(-1, 0)))
+            {
+                EditController.ExecuteWeldCenter(Scene, Selection, UndoStack);
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.Separator();
+            ImGui.DragFloat("Threshold", ref _weldThreshold, 0.001f, 0.0001f, 1.0f, "%.4f m");
+            if (ImGui.Button("Weld by Distance", new Vector2(-1, 0)))
+            {
+                EditController.ExecuteWeldDistance(Scene, Selection, _weldThreshold, UndoStack);
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawMirrorPopup()
+    {
+        if (ImGui.BeginPopup("MirrorPopup"))
+        {
+            ImGui.TextDisabled("Mirror Modifier");
+            ImGui.Separator();
+            int axisInt = (int)_mirrorAxis;
+            if (ImGui.RadioButton("X", axisInt == 0)) _mirrorAxis = Axis3D.X;
+            ImGui.SameLine();
+            if (ImGui.RadioButton("Y", axisInt == 1)) _mirrorAxis = Axis3D.Y;
+            ImGui.SameLine();
+            if (ImGui.RadioButton("Z", axisInt == 2)) _mirrorAxis = Axis3D.Z;
+
+            ImGui.DragFloat("Plane Coord", ref _mirrorPlaneCoord, 0.1f);
+            ImGui.Checkbox("Keep Original (Symmetric)", ref _mirrorKeepOriginal);
+            ImGui.DragFloat("Weld Threshold", ref _mirrorWeldThreshold, 0.001f, 0.0001f, 0.1f, "%.4f");
+
+            if (ImGui.Button("Apply", new Vector2(100, 0)))
+            {
+                EditController.ExecuteMirror(Scene, Selection, _mirrorAxis, _mirrorPlaneCoord, _mirrorKeepOriginal, _mirrorWeldThreshold, UndoStack);
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel", new Vector2(100, 0)))
+            {
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawLinearArrayPopup()
+    {
+        if (ImGui.BeginPopup("LinearArrayPopup"))
+        {
+            ImGui.TextDisabled("Linear Array");
+            ImGui.Separator();
+            ImGui.SliderInt("Count", ref _linearArrayCount, 2, 64);
+            Vector3 offset = _linearArrayOffset;
+            if (ImGui.DragFloat3("Step Offset", ref offset, 0.1f))
+            {
+                _linearArrayOffset = offset;
+            }
+
+            if (ImGui.Button("Apply", new Vector2(100, 0)))
+            {
+                EditController.ExecuteLinearArray(Scene, Selection, _linearArrayCount, _linearArrayOffset, UndoStack);
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel", new Vector2(100, 0)))
+            {
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawRadialArrayPopup()
+    {
+        if (ImGui.BeginPopup("RadialArrayPopup"))
+        {
+            ImGui.TextDisabled("Radial Array");
+            ImGui.Separator();
+            ImGui.SliderInt("Count", ref _radialArrayCount, 3, 64);
+            int axisInt = (int)_radialArrayAxis;
+            if (ImGui.RadioButton("X", axisInt == 0)) _radialArrayAxis = Axis3D.X;
+            ImGui.SameLine();
+            if (ImGui.RadioButton("Y", axisInt == 1)) _radialArrayAxis = Axis3D.Y;
+            ImGui.SameLine();
+            if (ImGui.RadioButton("Z", axisInt == 2)) _radialArrayAxis = Axis3D.Z;
+
+            Vector3 piv = _radialArrayPivot;
+            if (ImGui.DragFloat3("Pivot", ref piv, 0.1f))
+            {
+                _radialArrayPivot = piv;
+            }
+
+            ImGui.SliderFloat("Angle", ref _radialArrayAngle, 1.0f, 360.0f, "%.0f°");
+
+            if (ImGui.Button("Apply", new Vector2(100, 0)))
+            {
+                EditController.ExecuteRadialArray(Scene, Selection, _radialArrayCount, _radialArrayAxis, _radialArrayPivot, _radialArrayAngle, UndoStack);
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel", new Vector2(100, 0)))
+            {
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawNormalsContextMenu()
+    {
+        if (ImGui.BeginPopup("NormalsContextMenu"))
+        {
+            ImGui.TextDisabled("Mesh Normals (Alt+N)");
+            ImGui.Separator();
+            if (ImGui.MenuItem("Flip Selected Normals"))
+            {
+                EditController.ExecuteFlipNormals(Scene, Selection, UndoStack);
+            }
+            if (ImGui.MenuItem("Recalculate Outside"))
+            {
+                EditController.ExecuteRecalculateNormals(Scene, Selection, insideOut: false, UndoStack);
+            }
+            if (ImGui.MenuItem("Recalculate Inside / Hollow Room"))
+            {
+                EditController.ExecuteRecalculateNormals(Scene, Selection, insideOut: true, UndoStack);
+            }
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawDeleteContextMenu()
+    {
+        if (ImGui.BeginPopup("DeleteContextMenu"))
+        {
+            ImGui.TextDisabled("Delete / Dissolve (X / Del)");
+            ImGui.Separator();
+            if (Selection.Mode == InteractionMode.Face)
+            {
+                if (ImGui.MenuItem("Delete Faces (Delete)"))
+                {
+                    EditController.ExecuteDeleteFaces(Scene, Selection, UndoStack);
+                }
+                if (ImGui.MenuItem("Dissolve Faces (X)"))
+                {
+                    EditController.ExecuteDissolveFaces(Scene, Selection, UndoStack);
+                }
+            }
+            else if (Selection.Mode == InteractionMode.Vertex)
+            {
+                if (ImGui.MenuItem("Delete / Weld Vertices (Delete)"))
+                {
+                    EditController.ExecuteWeldCenter(Scene, Selection, UndoStack);
+                }
+            }
+            else if (Selection.Mode == InteractionMode.Edge)
+            {
+                if (ImGui.MenuItem("Delete Edges (Delete)"))
+                {
+                    EditController.ExecuteSubdivideEdges(Scene, Selection, 1, UndoStack);
+                }
+            }
+            else
+            {
+                if (ImGui.MenuItem("Delete Objects (Delete)"))
+                {
+                    EditController.ExecuteDeleteObjects(Scene, Selection, UndoStack);
+                }
+            }
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawViewportContextMenu()
+    {
+        if (ImGui.BeginPopup("ViewportContextMenu"))
+        {
+            ImGui.TextDisabled($"Context Menu ({Selection.Mode})");
+            ImGui.Separator();
+
+            if (Selection.Mode == InteractionMode.Object)
+            {
+                if (ImGui.MenuItem("Quick Clone", "Shift+D"))
+                {
+                    if (EditController.ExecuteQuickClone(Scene, Selection, UndoStack))
+                    {
+                        Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, _viewportRenderer.ViewportSize);
+                        ModalController.Start(ModalTransformMode.Move, Scene, Selection, ray, Camera.GetForward(), UndoStack);
+                    }
+                }
+                if (ImGui.MenuItem("Mirror..."))
+                {
+                    ShortcutHandler.OpenMirrorPopupRequested = true;
+                }
+                if (ImGui.MenuItem("Linear Array..."))
+                {
+                    ShortcutHandler.OpenLinearArrayPopupRequested = true;
+                }
+                if (ImGui.MenuItem("Radial Array..."))
+                {
+                    ShortcutHandler.OpenRadialArrayPopupRequested = true;
+                }
+                ImGui.Separator();
+                if (ImGui.MenuItem("Delete Selected", "Del / X"))
+                {
+                    EditController.ExecuteDeleteObjects(Scene, Selection, UndoStack);
+                }
+            }
+            else if (Selection.Mode == InteractionMode.Vertex)
+            {
+                if (ImGui.MenuItem("Connect Vertices", "J"))
+                {
+                    EditController.ExecuteConnectVertices(Scene, Selection, UndoStack);
+                }
+                if (ImGui.MenuItem("Fill Face", "F"))
+                {
+                    EditController.ExecuteFillFace(Scene, Selection, UndoStack);
+                }
+                if (ImGui.MenuItem("Weld Vertices...", "M"))
+                {
+                    ShortcutHandler.OpenWeldPopupRequested = true;
+                }
+                ImGui.Separator();
+                if (ImGui.MenuItem("Delete Vertices", "Del / X"))
+                {
+                    ShortcutHandler.OpenDeletePopupRequested = true;
+                }
+            }
+            else if (Selection.Mode == InteractionMode.Edge)
+            {
+                if (ImGui.MenuItem("Extrude Edges", "E"))
+                {
+                    Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, _viewportRenderer.ViewportSize);
+                    EditController.StartExtrude(Scene, Selection, ray, Camera.GetForward(), UndoStack);
+                }
+                if (ImGui.MenuItem("Subdivide Edges..."))
+                {
+                    ShortcutHandler.OpenSubdividePopupRequested = true;
+                }
+                if (ImGui.MenuItem("Fill Face", "F"))
+                {
+                    EditController.ExecuteFillFace(Scene, Selection, UndoStack);
+                }
+                ImGui.Separator();
+                if (ImGui.MenuItem("Delete Edges", "Del / X"))
+                {
+                    ShortcutHandler.OpenDeletePopupRequested = true;
+                }
+            }
+            else if (Selection.Mode == InteractionMode.Face)
+            {
+                if (ImGui.MenuItem("Extrude Faces", "E"))
+                {
+                    Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, _viewportRenderer.ViewportSize);
+                    EditController.StartExtrude(Scene, Selection, ray, Camera.GetForward(), UndoStack);
+                }
+                if (ImGui.MenuItem("Inset Faces", "I"))
+                {
+                    EditController.StartInset(Scene, Selection, ImGui.GetMousePos(), UndoStack);
+                }
+                if (ImGui.MenuItem("Quick Clone Faces", "Shift+D"))
+                {
+                    if (EditController.ExecuteQuickClone(Scene, Selection, UndoStack))
+                    {
+                        Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, _viewportRenderer.ViewportSize);
+                        ModalController.Start(ModalTransformMode.Move, Scene, Selection, ray, Camera.GetForward(), UndoStack);
+                    }
+                }
+                if (ImGui.MenuItem("Dissolve Faces", "X"))
+                {
+                    EditController.ExecuteDissolveFaces(Scene, Selection, UndoStack);
+                }
+                if (ImGui.MenuItem("Delete Faces", "Del"))
+                {
+                    EditController.ExecuteDeleteFaces(Scene, Selection, UndoStack);
+                }
+                ImGui.Separator();
+                if (ImGui.MenuItem("Normals Menu...", "Alt+N"))
+                {
+                    ShortcutHandler.OpenNormalsPopupRequested = true;
+                }
+                if (ImGui.MenuItem("Subdivide..."))
+                {
+                    ShortcutHandler.OpenSubdividePopupRequested = true;
+                }
+            }
+
+            ImGui.EndPopup();
+        }
     }
 
     public void Dispose()
