@@ -59,6 +59,26 @@ public sealed class EditorScene
         _objects.Add(sceneObject);
     }
 
+    /// <summary>
+    /// Deep-clones an existing SceneObject, allocates a new unique ID, adds it to the scene, and returns the clone.
+    /// </summary>
+    public SceneObject AddClonedObject(SceneObject original, string? newName = null)
+    {
+        ArgumentNullException.ThrowIfNull(original);
+
+        int id = _nextObjectId++;
+        string name = newName ?? $"{original.Name}_Copy";
+        var clone = new SceneObject(id, name, original.Mesh?.Clone(), original.Transform.Clone())
+        {
+            Visible = original.Visible,
+            Locked = original.Locked
+        };
+
+        _objectsById[id] = clone;
+        _objects.Add(clone);
+        return clone;
+    }
+
     public bool RemoveObject(int objectId)
     {
         if (!_objectsById.Remove(objectId, out SceneObject? sceneObject))

@@ -149,12 +149,34 @@ public sealed class SelectionManager
         _selectedFaceIds.Add(faceId);
     }
 
+    public void SelectMultipleFaces(IEnumerable<int> faceIds)
+    {
+        ArgumentNullException.ThrowIfNull(faceIds);
+        _selectedFaceIds.Clear();
+        foreach (int id in faceIds)
+        {
+            _selectedFaceIds.Add(id);
+        }
+    }
+
     public void ToggleSelectFace(int faceId)
     {
         if (!_selectedFaceIds.Remove(faceId))
         {
             _selectedFaceIds.Add(faceId);
         }
+    }
+
+    public void SelectMultipleObjects(IEnumerable<int> objectIds)
+    {
+        ArgumentNullException.ThrowIfNull(objectIds);
+        _selectedObjectIds.Clear();
+        foreach (int id in objectIds)
+        {
+            _selectedObjectIds.Add(id);
+        }
+        ActiveObjectId = _selectedObjectIds.Count > 0 ? _selectedObjectIds.First() : null;
+        ClearSubElementSelection();
     }
 
     public void ClearSelection()
