@@ -2,6 +2,7 @@ using System.Numerics;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Math;
 using Leed3D.Kernel.Texturing;
+using Leed3D.Runtime.Metadata;
 
 namespace Leed3D.Kernel.Csg;
 
@@ -28,23 +29,26 @@ public sealed class CsgPolygon
     public Plane3D Plane { get; private set; }
     public string MaterialId { get; set; }
     public FaceUvMapping? UvMapping { get; set; }
+    public ElementMetadata? Metadata { get; set; }
 
-    public CsgPolygon(IEnumerable<Vector3> vertices, string materialId = PolygonFace.DefaultMaterialId, FaceUvMapping? uvMapping = null)
+    public CsgPolygon(IEnumerable<Vector3> vertices, string materialId = PolygonFace.DefaultMaterialId, FaceUvMapping? uvMapping = null, ElementMetadata? metadata = null)
     {
         ArgumentNullException.ThrowIfNull(vertices);
         Vertices = new List<Vector3>(vertices);
         MaterialId = string.IsNullOrWhiteSpace(materialId) ? PolygonFace.DefaultMaterialId : materialId;
         Plane = ComputePlane(Vertices);
         UvMapping = uvMapping?.Clone();
+        Metadata = metadata?.Clone();
     }
 
-    public CsgPolygon(IEnumerable<Vector3> vertices, string materialId, Plane3D explicitPlane, FaceUvMapping? uvMapping = null)
+    public CsgPolygon(IEnumerable<Vector3> vertices, string materialId, Plane3D explicitPlane, FaceUvMapping? uvMapping = null, ElementMetadata? metadata = null)
     {
         ArgumentNullException.ThrowIfNull(vertices);
         Vertices = new List<Vector3>(vertices);
         MaterialId = string.IsNullOrWhiteSpace(materialId) ? PolygonFace.DefaultMaterialId : materialId;
         Plane = explicitPlane;
         UvMapping = uvMapping?.Clone();
+        Metadata = metadata?.Clone();
     }
 
     /// <summary>
@@ -61,7 +65,7 @@ public sealed class CsgPolygon
     /// </summary>
     public CsgPolygon Clone()
     {
-        return new CsgPolygon(Vertices, MaterialId, Plane, UvMapping);
+        return new CsgPolygon(Vertices, MaterialId, Plane, UvMapping, Metadata);
     }
 
     /// <summary>
@@ -529,12 +533,12 @@ public sealed class BspNode
 
                 if (f.Count >= 3 && CsgPolygon.ComputeNewellVector(f).LengthSquared() > 1e-12f)
                 {
-                    front.Add(new CsgPolygon(f, polygon.MaterialId, polygon.Plane, polygon.UvMapping));
+                    front.Add(new CsgPolygon(f, polygon.MaterialId, polygon.Plane, polygon.UvMapping, polygon.Metadata));
                 }
 
                 if (b.Count >= 3 && CsgPolygon.ComputeNewellVector(b).LengthSquared() > 1e-12f)
                 {
-                    back.Add(new CsgPolygon(b, polygon.MaterialId, polygon.Plane, polygon.UvMapping));
+                    back.Add(new CsgPolygon(b, polygon.MaterialId, polygon.Plane, polygon.UvMapping, polygon.Metadata));
                 }
                 break;
             }

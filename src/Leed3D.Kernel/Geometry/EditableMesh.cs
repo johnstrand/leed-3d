@@ -1,26 +1,29 @@
 using System.Numerics;
 using Leed3D.Kernel.Math;
 using Leed3D.Kernel.Texturing;
+using Leed3D.Runtime.Metadata;
 
 namespace Leed3D.Kernel.Geometry;
 
 /// <summary>
-/// Represents a single vertex with a stable unique ID and 3D position inside an <see cref="EditableMesh"/>.
+/// Represents a single vertex with a stable unique ID, 3D position, and granular metadata inside an <see cref="EditableMesh"/>.
 /// </summary>
 public sealed class MeshVertex
 {
     public int Id { get; }
     public Vector3 Position { get; set; }
+    public ElementMetadata Metadata { get; set; }
 
-    public MeshVertex(int id, Vector3 position)
+    public MeshVertex(int id, Vector3 position, ElementMetadata? metadata = null)
     {
         Id = id;
         Position = position;
+        Metadata = metadata ?? new ElementMetadata();
     }
 
     public MeshVertex Clone()
     {
-        return new MeshVertex(Id, Position);
+        return new MeshVertex(Id, Position, Metadata.Clone());
     }
 }
 
@@ -35,13 +38,15 @@ public sealed class PolygonFace
     public List<int> VertexIds { get; }
     public string MaterialId { get; set; }
     public FaceUvMapping UvMapping { get; set; }
+    public ElementMetadata Metadata { get; set; }
 
-    public PolygonFace(int id, IEnumerable<int> vertexIds, string materialId = DefaultMaterialId, FaceUvMapping? uvMapping = null)
+    public PolygonFace(int id, IEnumerable<int> vertexIds, string materialId = DefaultMaterialId, FaceUvMapping? uvMapping = null, ElementMetadata? metadata = null)
     {
         Id = id;
         VertexIds = new List<int>(vertexIds);
         MaterialId = string.IsNullOrWhiteSpace(materialId) ? DefaultMaterialId : materialId;
         UvMapping = uvMapping ?? new FaceUvMapping();
+        Metadata = metadata ?? new ElementMetadata();
     }
 
     /// <summary>
@@ -112,7 +117,7 @@ public sealed class PolygonFace
 
     public PolygonFace Clone()
     {
-        return new PolygonFace(Id, VertexIds, MaterialId, UvMapping.Clone());
+        return new PolygonFace(Id, VertexIds, MaterialId, UvMapping.Clone(), Metadata.Clone());
     }
 }
 
@@ -126,6 +131,7 @@ public sealed class EditableMesh
     private readonly List<MeshVertex> _vertices = new();
     private readonly Dictionary<int, PolygonFace> _facesById = new();
     private readonly List<PolygonFace> _faces = new();
+    private readonly Dictionary<EdgeKey, ElementMetadata> _edgeMetadata = new();
 
     private int _nextVertexId = 1;
     private int _nextFaceId = 1;
@@ -133,28 +139,51 @@ public sealed class EditableMesh
 
     public IReadOnlyList<MeshVertex> Vertices => _vertices;
     public IReadOnlyList<PolygonFace> Faces => _faces;
+    public Dictionary<EdgeKey, ElementMetadata> EdgeMetadata => _edgeMetadata;
 
     public int VertexCount => _vertices.Count;
     public int FaceCount => _faces.Count;
 
     /// <summary>
+    /// Gets or creates the <see cref="ElementMetadata"/> for the given edge.
+    /// </summary>
+    public ElementMetadata GetOrCreateEdgeMetadata(EdgeKey edge)
+    {
+        if (!_edgeMetadata.TryGetValue(edge, out ElementMetadata? meta))
+        {
+            meta = new ElementMetadata();
+            _edgeMetadata[edge] = meta;
+        }
+
+        return meta;
+    }
+
+    /// <summary>
+    /// Gets existing metadata for the edge, or null if none.
+    /// </summary>
+    public ElementMetadata? GetEdgeMetadata(EdgeKey edge)
+    {
+        return _edgeMetadata.GetValueOrDefault(edge);
+    }
+
+    /// <summary>
     /// Adds a vertex at the specified 3D position and returns its stable unique ID.
     /// </summary>
-    public int AddVertex(Vector3 position)
+    public int AddVertex(Vector3 position, ElementMetadata? metadata = null)
     {
         int id = _nextVertexId++;
-        AddVertexWithId(id, position);
+        AddVertexWithId(id, position, metadata);
         return id;
     }
 
-    internal void AddVertexWithId(int id, Vector3 position)
+    internal void AddVertexWithId(int id, Vector3 position, ElementMetadata? metadata = null)
     {
         if (id >= _nextVertexId)
         {
             _nextVertexId = id + 1;
         }
 
-        var vertex = new MeshVertex(id, position);
+        var vertex = new MeshVertex(id, position, metadata);
         _verticesById[id] = vertex;
         _vertices.Add(vertex);
         InvalidateTopology();
@@ -163,7 +192,7 @@ public sealed class EditableMesh
     /// <summary>
     /// Adds an N-gon polygon face with the given ordered vertex ID loop and returns its stable unique ID.
     /// </summary>
-    public int AddFace(IEnumerable<int> vertexIds, string materialId = PolygonFace.DefaultMaterialId, FaceUvMapping? uvMapping = null)
+    public int AddFace(IEnumerable<int> vertexIds, string materialId = PolygonFace.DefaultMaterialId, FaceUvMapping? uvMapping = null, ElementMetadata? metadata = null)
     {
         ArgumentNullException.ThrowIfNull(vertexIds);
 
@@ -182,18 +211,18 @@ public sealed class EditableMesh
         }
 
         int id = _nextFaceId++;
-        AddFaceWithId(id, idList, materialId, uvMapping);
+        AddFaceWithId(id, idList, materialId, uvMapping, metadata);
         return id;
     }
 
-    internal void AddFaceWithId(int id, IEnumerable<int> vertexIds, string materialId = PolygonFace.DefaultMaterialId, FaceUvMapping? uvMapping = null)
+    internal void AddFaceWithId(int id, IEnumerable<int> vertexIds, string materialId = PolygonFace.DefaultMaterialId, FaceUvMapping? uvMapping = null, ElementMetadata? metadata = null)
     {
         if (id >= _nextFaceId)
         {
             _nextFaceId = id + 1;
         }
 
-        var face = new PolygonFace(id, vertexIds, materialId, uvMapping?.Clone());
+        var face = new PolygonFace(id, vertexIds, materialId, uvMapping?.Clone(), metadata?.Clone());
         if (uvMapping is null || !uvMapping.TextureLock)
         {
             Vector3 normal = face.ComputeNormal(this);
@@ -284,6 +313,11 @@ public sealed class EditableMesh
             PolygonFace clonedFace = _faces[i].Clone();
             copy._faces.Add(clonedFace);
             copy._facesById[clonedFace.Id] = clonedFace;
+        }
+
+        foreach (var (edge, meta) in _edgeMetadata)
+        {
+            copy._edgeMetadata[edge] = meta.Clone();
         }
 
         return copy;
@@ -389,6 +423,35 @@ public sealed class EditableMesh
             {
                 _verticesById.Remove(vertId);
                 _vertices.RemoveAt(i);
+            }
+        }
+
+        // Prune EdgeMetadata for edges that no longer exist in any face
+        if (_edgeMetadata.Count > 0)
+        {
+            var validEdges = new HashSet<EdgeKey>();
+            for (int i = 0; i < _faces.Count; i++)
+            {
+                List<int> loop = _faces[i].VertexIds;
+                int count = loop.Count;
+                for (int j = 0; j < count; j++)
+                {
+                    validEdges.Add(new EdgeKey(loop[j], loop[(j + 1) % count]));
+                }
+            }
+
+            var deadEdges = new List<EdgeKey>();
+            foreach (EdgeKey ek in _edgeMetadata.Keys)
+            {
+                if (!validEdges.Contains(ek))
+                {
+                    deadEdges.Add(ek);
+                }
+            }
+
+            for (int i = 0; i < deadEdges.Count; i++)
+            {
+                _edgeMetadata.Remove(deadEdges[i]);
             }
         }
 

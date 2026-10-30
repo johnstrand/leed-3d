@@ -439,12 +439,92 @@ public sealed class ViewportRenderer : IDisposable
             Rlgl.End();
         }
 
+        // Collision-disabled faces visual indicator (translucent magenta/purple fill with hatched lines to centroid)
+        bool hasCollisionDisabledFaces = false;
+        for (int i = 0; i < mesh.Faces.Count; i++)
+        {
+            if (mesh.Faces[i].Metadata.IsCollisionDisabled())
+            {
+                hasCollisionDisabledFaces = true;
+                break;
+            }
+        }
+
+        if (hasCollisionDisabledFaces)
+        {
+            Color collisionDisabledFill = new(180, 50, 220, 75);
+            Color collisionDisabledHatch = new(215, 80, 255, 200);
+
+            Rlgl.Begin(DrawMode.Triangles);
+            for (int fIdx = 0; fIdx < mesh.Faces.Count; fIdx++)
+            {
+                PolygonFace face = mesh.Faces[fIdx];
+                if (!face.Metadata.IsCollisionDisabled())
+                {
+                    continue;
+                }
+
+                IReadOnlyList<(int V0, int V1, int V2)> tris = PolygonTriangulator.TriangulateFace(face, mesh);
+                for (int tIdx = 0; tIdx < tris.Count; tIdx++)
+                {
+                    if (Rlgl.CheckRenderBatchLimit(3))
+                    {
+                        Rlgl.Begin(DrawMode.Triangles);
+                    }
+
+                    var (v0Id, v1Id, v2Id) = tris[tIdx];
+                    var (w0Id, w1Id, w2Id) = CoordSpace.FlipTriangleWinding(v0Id, v1Id, v2Id);
+
+                    MeshVertex? mv0 = mesh.GetVertex(w0Id);
+                    MeshVertex? mv1 = mesh.GetVertex(w1Id);
+                    MeshVertex? mv2 = mesh.GetVertex(w2Id);
+                    if (mv0 is null || mv1 is null || mv2 is null)
+                    {
+                        continue;
+                    }
+
+                    Vector3 p0Rh = CoordSpace.ToRightHanded(Vector3.Transform(mv0.Position, worldMatrix));
+                    Vector3 p1Rh = CoordSpace.ToRightHanded(Vector3.Transform(mv1.Position, worldMatrix));
+                    Vector3 p2Rh = CoordSpace.ToRightHanded(Vector3.Transform(mv2.Position, worldMatrix));
+
+                    Rlgl.Color4ub(collisionDisabledFill.R, collisionDisabledFill.G, collisionDisabledFill.B, collisionDisabledFill.A);
+                    Rlgl.Vertex3f(p0Rh.X, p0Rh.Y, p0Rh.Z);
+                    Rlgl.Vertex3f(p1Rh.X, p1Rh.Y, p1Rh.Z);
+                    Rlgl.Vertex3f(p2Rh.X, p2Rh.Y, p2Rh.Z);
+                }
+            }
+            Rlgl.End();
+
+            // Diagonal hatch lines connecting centroid to face vertices
+            Rlgl.Begin(DrawMode.Lines);
+            for (int fIdx = 0; fIdx < mesh.Faces.Count; fIdx++)
+            {
+                PolygonFace face = mesh.Faces[fIdx];
+                if (!face.Metadata.IsCollisionDisabled())
+                {
+                    continue;
+                }
+
+                Vector3 centerWorld = Vector3.Transform(face.ComputeCentroid(mesh), worldMatrix);
+                for (int v = 0; v < face.VertexIds.Count; v++)
+                {
+                    if (mesh.GetVertex(face.VertexIds[v]) is { } vert)
+                    {
+                        Vector3 vertWorld = Vector3.Transform(vert.Position, worldMatrix);
+                        EmitLineEditorSpace(centerWorld, vertWorld, collisionDisabledHatch);
+                    }
+                }
+            }
+            Rlgl.End();
+        }
+
         // Draw true N-gon topological edges (not internal triangulation diagonals!)
         if (drawWireframe || isObjectSelected || customEdgeColor.HasValue)
         {
             Color defaultEdgeColor = shadingMode == ViewportShadingMode.Wireframe ? PureWireframeColor : WireframeEdgeColor;
             Color objectHighlightColor = new(255, 140, 30, 255);
             Color selectedSubEdgeColor = new(255, 150, 30, 255);
+            Color metadataEdgeColor = new(48, 224, 208, 255);
 
             TopologyGraph topology = mesh.GetTopology();
 
@@ -485,12 +565,39 @@ public sealed class ViewportRenderer : IDisposable
                         {
                             edgeColor = selectedSubEdgeColor;
                         }
+                        else if (mesh.EdgeMetadata.TryGetValue(edgeKey, out var edgeMeta) && (edgeMeta.Properties.Count > 0 || edgeMeta.Tags.Count > 0))
+                        {
+                            edgeColor = metadataEdgeColor;
+                        }
+                    }
+                    else if (mesh.EdgeMetadata.TryGetValue(edgeKey, out var edgeMeta) && (edgeMeta.Properties.Count > 0 || edgeMeta.Tags.Count > 0))
+                    {
+                        edgeColor = metadataEdgeColor;
                     }
                 }
 
                 EmitLineEditorSpace(pA, pB, edgeColor);
             }
             Rlgl.End();
+
+            // In Vertex Mode, draw vertex handles with metadata highlights
+            if (isEditModeActive && selection!.Mode == InteractionMode.Vertex)
+            {
+                Color vertexNormalColor = new(200, 200, 200, 255);
+                Color vertexSelectedColor = new(255, 150, 30, 255);
+                Color vertexMetaColor = new(48, 224, 208, 255);
+                const float vSize = 0.04f;
+
+                for (int i = 0; i < mesh.Vertices.Count; i++)
+                {
+                    MeshVertex v = mesh.Vertices[i];
+                    Vector3 pWorld = Vector3.Transform(v.Position, worldMatrix);
+                    bool isSelected = selection.SelectedVertexIds.Contains(v.Id);
+                    bool hasMeta = v.Metadata.Properties.Count > 0 || v.Metadata.Tags.Count > 0;
+                    Color col = isSelected ? vertexSelectedColor : (hasMeta ? vertexMetaColor : vertexNormalColor);
+                    DrawCubeHandle3D(pWorld, isSelected ? vSize * 1.4f : vSize, col);
+                }
+            }
         }
     }
 

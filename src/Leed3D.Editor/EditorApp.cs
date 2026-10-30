@@ -47,6 +47,7 @@ public sealed class EditorApp : IDisposable
 
     public TextureBrowserPanel TextureBrowser { get; } = new();
     public UvInspectorPanel UvInspector { get; } = new();
+    public MetadataInspectorPanel MetadataInspector { get; } = new();
 
     public ViewportShadingMode ShadingMode { get; set; } = ViewportShadingMode.SolidWithWireframe;
     public bool SnapToGridEnabled { get; set; } = true;
@@ -194,6 +195,7 @@ public sealed class EditorApp : IDisposable
         DrawCsgPanel();
         TextureBrowser.Draw(this);
         UvInspector.Draw(this);
+        MetadataInspector.Draw(this);
         DrawStatusBar(mainViewport, statusBarHeight);
     }
 
@@ -314,6 +316,14 @@ public sealed class EditorApp : IDisposable
                 Camera.FrameTarget(Vector3.Zero, 5.0f);
             }
 
+            ImGui.EndMenu();
+        }
+
+        if (ImGui.BeginMenu("Window"))
+        {
+            ImGui.MenuItem("Texture Browser", null, true);
+            ImGui.MenuItem("UV Inspector", null, true);
+            ImGui.MenuItem("Metadata Inspector", null, true);
             ImGui.EndMenu();
         }
 

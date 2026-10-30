@@ -362,9 +362,15 @@ public static class MeshTopologyOps
             if (loopAB.Count >= 3 && loopBA.Count >= 3)
             {
                 string materialId = face.MaterialId;
+                var metaCopy = face.Metadata.Clone();
                 mesh.RemoveFace(face.Id);
-                mesh.AddFace(loopAB, materialId);
-                mesh.AddFace(loopBA, materialId);
+                int f1 = mesh.AddFace(loopAB, materialId);
+                int f2 = mesh.AddFace(loopBA, materialId);
+                if (metaCopy.Properties.Count > 0 || metaCopy.Tags.Count > 0)
+                {
+                    mesh.GetFace(f1)?.Metadata.MergeFrom(metaCopy);
+                    mesh.GetFace(f2)?.Metadata.MergeFrom(metaCopy);
+                }
                 splitAny = true;
             }
         }
@@ -612,6 +618,22 @@ public static class MeshTopologyOps
             }
         }
 
+        foreach (var (edge, midIds) in edgeSubdivisions)
+        {
+            var meta = mesh.GetEdgeMetadata(edge);
+            if (meta is not null && (meta.Properties.Count > 0 || meta.Tags.Count > 0))
+            {
+                int prev = edge.VMin;
+                for (int k = 0; k < midIds.Length; k++)
+                {
+                    int next = midIds[k];
+                    mesh.GetOrCreateEdgeMetadata(new EdgeKey(prev, next)).MergeFrom(meta);
+                    prev = next;
+                }
+                mesh.GetOrCreateEdgeMetadata(new EdgeKey(prev, edge.VMax)).MergeFrom(meta);
+            }
+        }
+
         mesh.InvalidateTopology();
         return createdVertexIds;
     }
@@ -664,9 +686,13 @@ public static class MeshTopologyOps
                 return dupId;
             }
 
-            Vector3 originalPos = mesh.GetVertex(originalVertexId)!.Position;
-            dupId = mesh.AddVertex(originalPos + offset);
+            MeshVertex? origVert = mesh.GetVertex(originalVertexId);
+            dupId = mesh.AddVertex(origVert!.Position + offset);
             duplicatedVertices[originalVertexId] = dupId;
+            if (mesh.GetVertex(dupId) is { } newV && origVert is not null && (origVert.Metadata.Properties.Count > 0 || origVert.Metadata.Tags.Count > 0))
+            {
+                newV.Metadata = origVert.Metadata.Clone();
+            }
             return dupId;
         }
 
@@ -699,7 +725,13 @@ public static class MeshTopologyOps
             int vNew = GetOrCreateExtrudedVertex(v);
 
             int newFaceId = mesh.AddFace([u, v, vNew, uNew], materialId);
-            results.Add((new EdgeKey(uNew, vNew), newFaceId));
+            var newEdgeKey = new EdgeKey(uNew, vNew);
+            var edgeMeta = mesh.GetEdgeMetadata(edge);
+            if (edgeMeta is not null && (edgeMeta.Properties.Count > 0 || edgeMeta.Tags.Count > 0))
+            {
+                mesh.GetOrCreateEdgeMetadata(newEdgeKey).MergeFrom(edgeMeta);
+            }
+            results.Add((newEdgeKey, newFaceId));
         }
 
         mesh.InvalidateTopology();
@@ -1184,9 +1216,14 @@ public static class MeshTopologyOps
                 int oldVId = vIds[j];
                 if (!duplicatedVertices.TryGetValue(oldVId, out int newVId))
                 {
-                    Vector3 oldPos = mesh.GetVertex(oldVId)!.Position;
+                    MeshVertex? oldVert = mesh.GetVertex(oldVId);
+                    Vector3 oldPos = oldVert!.Position;
                     newVId = mesh.AddVertex(oldPos + offset);
                     duplicatedVertices[oldVId] = newVId;
+                    if (mesh.GetVertex(newVId) is { } newVert && oldVert is not null && (oldVert.Metadata.Properties.Count > 0 || oldVert.Metadata.Tags.Count > 0))
+                    {
+                        newVert.Metadata = oldVert.Metadata.Clone();
+                    }
                 }
 
                 // 4. Rewire the selected PolygonFace to use the new duplicated vertex IDs
@@ -1201,6 +1238,12 @@ public static class MeshTopologyOps
             int uNew = duplicatedVertices[u];
             int vNew = duplicatedVertices[v];
             mesh.AddFace([u, v, vNew, uNew], materialId);
+
+            var oldEdgeMeta = mesh.GetEdgeMetadata(new EdgeKey(u, v));
+            if (oldEdgeMeta is not null && (oldEdgeMeta.Properties.Count > 0 || oldEdgeMeta.Tags.Count > 0))
+            {
+                mesh.GetOrCreateEdgeMetadata(new EdgeKey(uNew, vNew)).MergeFrom(oldEdgeMeta);
+            }
         }
 
         mesh.ValidateAndRepair();
@@ -1678,6 +1721,11 @@ public static class MeshTopologyOps
             Vector3 miter = ComputeInwardMiter(pPrev, pCurr, pNext, faceNormal);
             Vector3 innerPos = pCurr + (miter * thickness) + (faceNormal * depth);
             innerIds[i] = mesh.AddVertex(innerPos);
+            MeshVertex? origVert = mesh.GetVertex(vIds[i]);
+            if (mesh.GetVertex(innerIds[i]) is { } inVert && origVert is not null && (origVert.Metadata.Properties.Count > 0 || origVert.Metadata.Tags.Count > 0))
+            {
+                inVert.Metadata = origVert.Metadata.Clone();
+            }
         }
 
         string materialId = face.MaterialId;
@@ -1695,6 +1743,12 @@ public static class MeshTopologyOps
         {
             int next = (i + 1) % n;
             mesh.AddFace([originalIds[i], originalIds[next], innerIds[next], innerIds[i]], materialId);
+
+            var oldEdgeMeta = mesh.GetEdgeMetadata(new EdgeKey(originalIds[i], originalIds[next]));
+            if (oldEdgeMeta is not null && (oldEdgeMeta.Properties.Count > 0 || oldEdgeMeta.Tags.Count > 0))
+            {
+                mesh.GetOrCreateEdgeMetadata(new EdgeKey(innerIds[i], innerIds[next])).MergeFrom(oldEdgeMeta);
+            }
         }
     }
 
@@ -1757,7 +1811,13 @@ public static class MeshTopologyOps
                     innerPos = pCurr + (regionNormal * depth);
                 }
 
-                innerVertexMap[vId] = mesh.AddVertex(innerPos);
+                MeshVertex? origVert = mesh.GetVertex(vId);
+                int newVertId = mesh.AddVertex(innerPos);
+                innerVertexMap[vId] = newVertId;
+                if (mesh.GetVertex(newVertId) is { } newVert && origVert is not null && (origVert.Metadata.Properties.Count > 0 || origVert.Metadata.Tags.Count > 0))
+                {
+                    newVert.Metadata = origVert.Metadata.Clone();
+                }
             }
         }
 
@@ -1776,6 +1836,12 @@ public static class MeshTopologyOps
         {
             (int u, int v, string materialId) = boundaryHalfEdges[i];
             mesh.AddFace([u, v, innerVertexMap[v], innerVertexMap[u]], materialId);
+
+            var oldEdgeMeta = mesh.GetEdgeMetadata(new EdgeKey(u, v));
+            if (oldEdgeMeta is not null && (oldEdgeMeta.Properties.Count > 0 || oldEdgeMeta.Tags.Count > 0))
+            {
+                mesh.GetOrCreateEdgeMetadata(new EdgeKey(innerVertexMap[u], innerVertexMap[v])).MergeFrom(oldEdgeMeta);
+            }
         }
     }
 

@@ -1,12 +1,13 @@
 using System.Numerics;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Math;
+using Leed3D.Runtime.Metadata;
 
 namespace Leed3D.Kernel.Scene;
 
 /// <summary>
-/// An entity/object within an <see cref="EditorScene"/> carrying a <see cref="Transform3D"/>
-/// and optional geometry <see cref="EditableMesh"/>.
+/// An entity/object within an <see cref="EditorScene"/> carrying a <see cref="Transform3D"/>,
+/// optional geometry <see cref="EditableMesh"/>, and granular <see cref="ElementMetadata"/>.
 /// </summary>
 public sealed class SceneObject
 {
@@ -14,6 +15,7 @@ public sealed class SceneObject
     public string Name { get; set; } = "Object";
     public Transform3D Transform { get; set; } = new();
     public EditableMesh? Mesh { get; set; }
+    public ElementMetadata Metadata { get; set; } = new();
     public bool Visible { get; set; } = true;
     public bool Locked { get; set; } = false;
 
@@ -21,12 +23,13 @@ public sealed class SceneObject
     {
     }
 
-    public SceneObject(int id, string name, EditableMesh? mesh = null, Transform3D? transform = null)
+    public SceneObject(int id, string name, EditableMesh? mesh = null, Transform3D? transform = null, ElementMetadata? metadata = null)
     {
         Id = id;
         Name = name;
         Mesh = mesh;
         Transform = transform ?? new Transform3D();
+        Metadata = metadata ?? new ElementMetadata();
     }
 
     /// <summary>
@@ -44,11 +47,11 @@ public sealed class SceneObject
     }
 
     /// <summary>
-    /// Creates a deep copy of this SceneObject, cloning its Transform and EditableMesh.
+    /// Creates a deep copy of this SceneObject, cloning its Transform, EditableMesh, and Metadata.
     /// </summary>
     public SceneObject Clone()
     {
-        return new SceneObject(Id, Name, Mesh?.Clone(), Transform.Clone())
+        return new SceneObject(Id, Name, Mesh?.Clone(), Transform.Clone(), Metadata.Clone())
         {
             Visible = Visible,
             Locked = Locked

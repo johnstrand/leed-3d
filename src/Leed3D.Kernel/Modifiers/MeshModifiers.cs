@@ -185,6 +185,10 @@ public static class MeshModifiers
                 Vector3 mirroredPos = SetAxisCoord(v.Position, axis, mirroredCoord);
                 int newVId = mesh.AddVertex(mirroredPos);
                 oldToMirroredVertexId[v.Id] = newVId;
+                if (mesh.GetVertex(newVId) is { } newVert && (v.Metadata.Properties.Count > 0 || v.Metadata.Tags.Count > 0))
+                {
+                    newVert.Metadata = v.Metadata.Clone();
+                }
             }
         }
 
@@ -192,7 +196,22 @@ public static class MeshModifiers
         {
             PolygonFace face = originalFaces[i];
             var mirroredLoop = face.VertexIds.Select(id => oldToMirroredVertexId[id]).Reverse().ToList();
-            mesh.AddFace(mirroredLoop, face.MaterialId);
+            int newFId = mesh.AddFace(mirroredLoop, face.MaterialId);
+            if (mesh.GetFace(newFId) is { } newFace && (face.Metadata.Properties.Count > 0 || face.Metadata.Tags.Count > 0))
+            {
+                newFace.Metadata = face.Metadata.Clone();
+            }
+        }
+
+        var oldEdges = mesh.EdgeMetadata.ToList();
+        foreach (var (edge, meta) in oldEdges)
+        {
+            if (oldToMirroredVertexId.TryGetValue(edge.VMin, out int mMin) &&
+                oldToMirroredVertexId.TryGetValue(edge.VMax, out int mMax) &&
+                mMin != mMax)
+            {
+                mesh.GetOrCreateEdgeMetadata(new EdgeKey(mMin, mMax)).MergeFrom(meta);
+            }
         }
 
         mesh.ValidateAndRepair();
@@ -304,13 +323,31 @@ public static class MeshModifiers
                     MeshVertex v = baseVertices[i];
                     int newId = mesh.AddVertex(v.Position + offset);
                     oldToNew[v.Id] = newId;
+                    if (mesh.GetVertex(newId) is { } newVert && (v.Metadata.Properties.Count > 0 || v.Metadata.Tags.Count > 0))
+                    {
+                        newVert.Metadata = v.Metadata.Clone();
+                    }
                 }
 
                 for (int i = 0; i < baseFaces.Count; i++)
                 {
                     PolygonFace f = baseFaces[i];
                     var newLoop = f.VertexIds.Select(id => oldToNew[id]).ToList();
-                    mesh.AddFace(newLoop, f.MaterialId);
+                    int newFId = mesh.AddFace(newLoop, f.MaterialId);
+                    if (mesh.GetFace(newFId) is { } newFace && (f.Metadata.Properties.Count > 0 || f.Metadata.Tags.Count > 0))
+                    {
+                        newFace.Metadata = f.Metadata.Clone();
+                    }
+                }
+
+                var oldEdges = mesh.EdgeMetadata.ToList();
+                foreach (var (edge, meta) in oldEdges)
+                {
+                    if (oldToNew.TryGetValue(edge.VMin, out int nMin) &&
+                        oldToNew.TryGetValue(edge.VMax, out int nMax))
+                    {
+                        mesh.GetOrCreateEdgeMetadata(new EdgeKey(nMin, nMax)).MergeFrom(meta);
+                    }
                 }
             }
 
@@ -358,6 +395,10 @@ public static class MeshModifiers
                 {
                     int newId = mesh.AddVertex(v.Position + offset);
                     oldToNew[vId] = newId;
+                    if (mesh.GetVertex(newId) is { } newVert && (v.Metadata.Properties.Count > 0 || v.Metadata.Tags.Count > 0))
+                    {
+                        newVert.Metadata = v.Metadata.Clone();
+                    }
                 }
             }
 
@@ -365,7 +406,21 @@ public static class MeshModifiers
             {
                 PolygonFace f = targetFaces[i];
                 var newLoop = f.VertexIds.Select(id => oldToNew[id]).ToList();
-                mesh.AddFace(newLoop, f.MaterialId);
+                int newFId = mesh.AddFace(newLoop, f.MaterialId);
+                if (mesh.GetFace(newFId) is { } newFace && (f.Metadata.Properties.Count > 0 || f.Metadata.Tags.Count > 0))
+                {
+                    newFace.Metadata = f.Metadata.Clone();
+                }
+            }
+
+            var oldEdges = mesh.EdgeMetadata.ToList();
+            foreach (var (edge, meta) in oldEdges)
+            {
+                if (oldToNew.TryGetValue(edge.VMin, out int nMin) &&
+                    oldToNew.TryGetValue(edge.VMax, out int nMax))
+                {
+                    mesh.GetOrCreateEdgeMetadata(new EdgeKey(nMin, nMax)).MergeFrom(meta);
+                }
             }
         }
 
@@ -463,13 +518,31 @@ public static class MeshModifiers
                     Vector3 rotated = pivot + Vector3.Transform(rel, q);
                     int newId = mesh.AddVertex(rotated);
                     oldToNew[v.Id] = newId;
+                    if (mesh.GetVertex(newId) is { } newVert && (v.Metadata.Properties.Count > 0 || v.Metadata.Tags.Count > 0))
+                    {
+                        newVert.Metadata = v.Metadata.Clone();
+                    }
                 }
 
                 for (int i = 0; i < baseFaces.Count; i++)
                 {
                     PolygonFace f = baseFaces[i];
                     var newLoop = f.VertexIds.Select(id => oldToNew[id]).ToList();
-                    mesh.AddFace(newLoop, f.MaterialId);
+                    int newFId = mesh.AddFace(newLoop, f.MaterialId);
+                    if (mesh.GetFace(newFId) is { } newFace && (f.Metadata.Properties.Count > 0 || f.Metadata.Tags.Count > 0))
+                    {
+                        newFace.Metadata = f.Metadata.Clone();
+                    }
+                }
+
+                var oldEdges = mesh.EdgeMetadata.ToList();
+                foreach (var (edge, meta) in oldEdges)
+                {
+                    if (oldToNew.TryGetValue(edge.VMin, out int nMin) &&
+                        oldToNew.TryGetValue(edge.VMax, out int nMax))
+                    {
+                        mesh.GetOrCreateEdgeMetadata(new EdgeKey(nMin, nMax)).MergeFrom(meta);
+                    }
                 }
             }
 
@@ -520,6 +593,10 @@ public static class MeshModifiers
                     Vector3 rotated = pivot + Vector3.Transform(rel, q);
                     int newId = mesh.AddVertex(rotated);
                     oldToNew[vId] = newId;
+                    if (mesh.GetVertex(newId) is { } newVert && (v.Metadata.Properties.Count > 0 || v.Metadata.Tags.Count > 0))
+                    {
+                        newVert.Metadata = v.Metadata.Clone();
+                    }
                 }
             }
 
@@ -527,7 +604,21 @@ public static class MeshModifiers
             {
                 PolygonFace f = targetFaces[i];
                 var newLoop = f.VertexIds.Select(id => oldToNew[id]).ToList();
-                mesh.AddFace(newLoop, f.MaterialId);
+                int newFId = mesh.AddFace(newLoop, f.MaterialId);
+                if (mesh.GetFace(newFId) is { } newFace && (f.Metadata.Properties.Count > 0 || f.Metadata.Tags.Count > 0))
+                {
+                    newFace.Metadata = f.Metadata.Clone();
+                }
+            }
+
+            var oldEdges = mesh.EdgeMetadata.ToList();
+            foreach (var (edge, meta) in oldEdges)
+            {
+                if (oldToNew.TryGetValue(edge.VMin, out int nMin) &&
+                    oldToNew.TryGetValue(edge.VMax, out int nMax))
+                {
+                    mesh.GetOrCreateEdgeMetadata(new EdgeKey(nMin, nMax)).MergeFrom(meta);
+                }
             }
         }
 
