@@ -3,6 +3,7 @@ using Leed3D.Kernel.Entities;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Math;
 using Leed3D.Kernel.Scene;
+using Leed3D.Runtime;
 using Leed3D.Runtime.Metadata;
 
 namespace Leed3D.Kernel.Physics;
@@ -246,6 +247,95 @@ public sealed class CollisionMeshWorld
                     ClassName = ent.ClassName,
                     Bounds = bounds,
                     Position = ent.Transform.Position,
+                    YawDegrees = entYaw,
+                    TargetId = targetId,
+                    EventName = eventName,
+                    OneShot = oneShot,
+                    Properties = ent.Properties.Clone()
+                });
+            }
+        }
+
+        return world;
+    }
+
+    /// <summary>
+    /// Builds a <see cref="CollisionMeshWorld"/> directly from pre-baked runtime layer data.
+    /// </summary>
+    public static CollisionMeshWorld BuildFromBaked(BakedRuntimeLayerData baked)
+    {
+        ArgumentNullException.ThrowIfNull(baked);
+
+        var world = new CollisionMeshWorld();
+
+        for (int i = 0; i < baked.CollisionTriangles.Count; i++)
+        {
+            BakedCollisionTriangleDto tri = baked.CollisionTriangles[i];
+            Vector3 v0 = tri.V0;
+            Vector3 v1 = tri.V1;
+            Vector3 v2 = tri.V2;
+            Vector3 normal = tri.Normal;
+            BoundingBox3D bounds = BoundingBox3D.FromPoints([v0, v1, v2]);
+
+            world._triangles.Add(new CollisionTriangle
+            {
+                V0 = v0,
+                V1 = v1,
+                V2 = v2,
+                Normal = normal,
+                Bounds = bounds,
+                ObjectId = 0,
+                FaceId = 0,
+                MaterialId = tri.MaterialId,
+                Metadata = tri.SurfaceMetadata.Clone()
+            });
+        }
+
+        for (int i = 0; i < baked.Entities.Count; i++)
+        {
+            LevelEntityDto ent = baked.Entities[i];
+            if (!ent.Visible)
+            {
+                continue;
+            }
+
+            float entYaw = ent.Properties.GetFloat("yaw") ?? ent.Transform.RotationEulerDegrees.Y;
+            world.AddDestination(new TeleportDestination
+            {
+                TargetId = ent.Id,
+                Position = ent.Transform.Position,
+                YawDegrees = entYaw
+            });
+
+            bool isPortal = ent.ClassName.Equals("portal", StringComparison.OrdinalIgnoreCase);
+            bool isTrigger = ent.ClassName.Equals("trigger", StringComparison.OrdinalIgnoreCase);
+
+            if (isPortal || isTrigger)
+            {
+                Vector3 size = Vector3.One;
+                if (ent.Properties.TryGet("size", out var sizeVal) && sizeVal is not null && sizeVal.Type == MetadataValueType.Vec3)
+                {
+                    size = sizeVal.Vec3Value;
+                }
+                else if (ent.Properties.TryGet("box_size", out var bsizeVal) && bsizeVal is not null && bsizeVal.Type == MetadataValueType.Vec3)
+                {
+                    size = bsizeVal.Vec3Value;
+                }
+
+                Vector3 half = size * 0.5f;
+                Vector3 pos = ent.Transform.Position;
+                BoundingBox3D bounds = new(pos - half, pos + half);
+
+                string targetId = ent.Properties.GetString("target_id") ?? string.Empty;
+                string eventName = ent.Properties.GetString("event_name") ?? string.Empty;
+                bool oneShot = ent.Properties.GetBool("one_shot", false);
+
+                world.AddTrigger(new CollisionTriggerVolume
+                {
+                    EntityId = ent.Id,
+                    ClassName = ent.ClassName,
+                    Bounds = bounds,
+                    Position = pos,
                     YawDegrees = entYaw,
                     TargetId = targetId,
                     EventName = eventName,

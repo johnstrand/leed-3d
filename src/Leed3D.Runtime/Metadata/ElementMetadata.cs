@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Numerics;
+using System.Text.Json.Serialization;
 
 namespace Leed3D.Runtime.Metadata;
 
@@ -48,6 +49,7 @@ public readonly record struct ColorRgba(byte R, byte G, byte B, byte A = 255)
 /// <summary>
 /// Immutable typed metadata property value supporting string, float, int, bool, ColorRgba, and Vector3.
 /// </summary>
+[JsonConverter(typeof(MetadataValueJsonConverter))]
 public sealed class MetadataValue : IEquatable<MetadataValue>
 {
     public MetadataValueType Type { get; }
@@ -122,6 +124,7 @@ public sealed class MetadataValue : IEquatable<MetadataValue>
 /// <summary>
 /// Granular typed key-value metadata container and tag set attachable to objects, faces, edges, and vertices.
 /// </summary>
+[JsonConverter(typeof(ElementMetadataJsonConverter))]
 public sealed class ElementMetadata
 {
     private readonly Dictionary<string, MetadataValue> _properties = new(StringComparer.OrdinalIgnoreCase);
