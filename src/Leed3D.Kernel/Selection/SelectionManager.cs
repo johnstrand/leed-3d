@@ -1,4 +1,5 @@
 using System.Numerics;
+using Leed3D.Kernel.Entities;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Scene;
 
@@ -20,21 +21,24 @@ public enum InteractionMode
 public sealed class SelectionManager
 {
     private readonly HashSet<int> _selectedObjectIds = [];
+    private readonly HashSet<string> _selectedEntityIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<int> _selectedVertexIds = [];
     private readonly HashSet<EdgeKey> _selectedEdges = [];
     private readonly HashSet<int> _selectedFaceIds = [];
 
     public InteractionMode Mode { get; private set; } = InteractionMode.Object;
     public int? ActiveObjectId { get; set; }
+    public string? ActiveEntityId { get; set; }
 
     public IReadOnlySet<int> SelectedObjectIds => _selectedObjectIds;
+    public IReadOnlySet<string> SelectedEntityIds => _selectedEntityIds;
     public IReadOnlySet<int> SelectedVertexIds => _selectedVertexIds;
     public IReadOnlySet<EdgeKey> SelectedEdges => _selectedEdges;
     public IReadOnlySet<int> SelectedFaceIds => _selectedFaceIds;
 
     public bool HasSelection => Mode switch
     {
-        InteractionMode.Object => _selectedObjectIds.Count > 0,
+        InteractionMode.Object => _selectedObjectIds.Count > 0 || _selectedEntityIds.Count > 0,
         InteractionMode.Vertex => _selectedVertexIds.Count > 0,
         InteractionMode.Edge => _selectedEdges.Count > 0,
         InteractionMode.Face => _selectedFaceIds.Count > 0,
@@ -92,8 +96,10 @@ public sealed class SelectionManager
     public void SelectSingleObject(int objectId)
     {
         _selectedObjectIds.Clear();
+        _selectedEntityIds.Clear();
         _selectedObjectIds.Add(objectId);
         ActiveObjectId = objectId;
+        ActiveEntityId = null;
         ClearSubElementSelection();
     }
 
@@ -113,6 +119,56 @@ public sealed class SelectionManager
             ActiveObjectId = objectId;
         }
         ClearSubElementSelection();
+    }
+
+    public void SelectSingleEntity(string entityId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(entityId);
+        _selectedObjectIds.Clear();
+        _selectedEntityIds.Clear();
+        _selectedEntityIds.Add(entityId);
+        ActiveEntityId = entityId;
+        ActiveObjectId = null;
+        ClearSubElementSelection();
+    }
+
+    public void ToggleSelectEntity(string entityId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(entityId);
+        if (_selectedEntityIds.Contains(entityId))
+        {
+            _selectedEntityIds.Remove(entityId);
+            if (ActiveEntityId == entityId)
+            {
+                ActiveEntityId = _selectedEntityIds.Count > 0 ? _selectedEntityIds.First() : null;
+            }
+        }
+        else
+        {
+            _selectedEntityIds.Add(entityId);
+            ActiveEntityId = entityId;
+        }
+        ClearSubElementSelection();
+    }
+
+    public void SelectMultipleEntities(IEnumerable<string> entityIds)
+    {
+        ArgumentNullException.ThrowIfNull(entityIds);
+        foreach (string id in entityIds)
+        {
+            if (!string.IsNullOrWhiteSpace(id))
+            {
+                _selectedEntityIds.Add(id);
+            }
+        }
+        if (!string.IsNullOrEmpty(ActiveEntityId) && !_selectedEntityIds.Contains(ActiveEntityId))
+        {
+            ActiveEntityId = _selectedEntityIds.Count > 0 ? _selectedEntityIds.First() : null;
+        }
+        else if (string.IsNullOrEmpty(ActiveEntityId) && _selectedEntityIds.Count > 0)
+        {
+            ActiveEntityId = _selectedEntityIds.First();
+        }
     }
 
     public void SelectSingleVertex(int vertexId)
@@ -185,7 +241,9 @@ public sealed class SelectionManager
         {
             case InteractionMode.Object:
                 _selectedObjectIds.Clear();
+                _selectedEntityIds.Clear();
                 ActiveObjectId = null;
+                ActiveEntityId = null;
                 ClearSubElementSelection();
                 break;
             case InteractionMode.Vertex:
@@ -213,6 +271,7 @@ public sealed class SelectionManager
         {
             case InteractionMode.Object:
                 _selectedObjectIds.Clear();
+                _selectedEntityIds.Clear();
                 foreach (SceneObject obj in scene.Objects)
                 {
                     if (obj.Visible && !obj.Locked)
@@ -220,9 +279,20 @@ public sealed class SelectionManager
                         _selectedObjectIds.Add(obj.Id);
                     }
                 }
+                foreach (LevelEntity entity in scene.Entities)
+                {
+                    if (entity.Visible && !entity.Locked)
+                    {
+                        _selectedEntityIds.Add(entity.Id);
+                    }
+                }
                 if (_selectedObjectIds.Count > 0 && (!ActiveObjectId.HasValue || !_selectedObjectIds.Contains(ActiveObjectId.Value)))
                 {
                     ActiveObjectId = _selectedObjectIds.First();
+                }
+                if (_selectedEntityIds.Count > 0 && (string.IsNullOrEmpty(ActiveEntityId) || !_selectedEntityIds.Contains(ActiveEntityId)))
+                {
+                    ActiveEntityId = _selectedEntityIds.First();
                 }
                 break;
 
@@ -265,9 +335,22 @@ public sealed class SelectionManager
                         newObjSelection.Add(obj.Id);
                     }
                 }
+                var newEntSelection = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (LevelEntity entity in scene.Entities)
+                {
+                    if (entity.Visible && !entity.Locked && !_selectedEntityIds.Contains(entity.Id))
+                    {
+                        newEntSelection.Add(entity.Id);
+                    }
+                }
+
                 _selectedObjectIds.Clear();
                 foreach (int id in newObjSelection) _selectedObjectIds.Add(id);
                 ActiveObjectId = _selectedObjectIds.Count > 0 ? _selectedObjectIds.First() : null;
+
+                _selectedEntityIds.Clear();
+                foreach (string id in newEntSelection) _selectedEntityIds.Add(id);
+                ActiveEntityId = _selectedEntityIds.Count > 0 ? _selectedEntityIds.First() : null;
                 break;
 
             case InteractionMode.Vertex:
@@ -321,7 +404,7 @@ public sealed class SelectionManager
 
         if (Mode == InteractionMode.Object)
         {
-            if (_selectedObjectIds.Count == 0) return null;
+            if (_selectedObjectIds.Count == 0 && _selectedEntityIds.Count == 0) return null;
 
             Vector3 sum = Vector3.Zero;
             int count = 0;
@@ -331,6 +414,15 @@ public sealed class SelectionManager
                 if (obj is not null)
                 {
                     sum += obj.Transform.Position;
+                    count++;
+                }
+            }
+            foreach (string id in _selectedEntityIds)
+            {
+                LevelEntity? ent = scene.GetEntity(id);
+                if (ent is not null)
+                {
+                    sum += ent.Transform.Position;
                     count++;
                 }
             }

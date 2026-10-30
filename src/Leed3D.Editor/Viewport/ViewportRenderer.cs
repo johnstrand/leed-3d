@@ -1,5 +1,6 @@
 using System.Numerics;
 using Leed3D.Editor.Texturing;
+using Leed3D.Kernel.Entities;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Gizmos;
 using Leed3D.Kernel.Math;
@@ -7,6 +8,7 @@ using Leed3D.Kernel.Scene;
 using Leed3D.Kernel.Selection;
 using Leed3D.Kernel.Texturing;
 using Leed3D.Kernel.Viewport;
+using Leed3D.Runtime.Metadata;
 using Raylib_cs;
 
 namespace Leed3D.Editor.Viewport;
@@ -71,7 +73,8 @@ public sealed class ViewportRenderer : IDisposable
         int? csgPreviewTargetId = null,
         int? csgPreviewCutterId = null,
         Color? csgCutterWireColor = null,
-        EditorTextureCache? textureCache = null)
+        EditorTextureCache? textureCache = null,
+        EntitySchemaRegistry? entityRegistry = null)
     {
         if (_renderTarget.Id == 0)
         {
@@ -117,6 +120,9 @@ public sealed class ViewportRenderer : IDisposable
 
             DrawMeshObject(obj, shadingMode, selection, customEdgeColor, textureCache);
         }
+
+        // Render gameplay entities and target-link lines
+        DrawEntitiesAndTargetLinks(scene, selection, entityRegistry);
 
         // 1. Render active modal operator infinite guide lines
         if (modalController is not null && modalController.IsActive)
@@ -900,6 +906,542 @@ public sealed class ViewportRenderer : IDisposable
         Rlgl.Color4ub(color.R, color.G, color.B, color.A);
         Rlgl.Vertex3f(startRh.X, startRh.Y, startRh.Z);
         Rlgl.Vertex3f(endRh.X, endRh.Y, endRh.Z);
+    }
+
+    private static void EmitTriangleEditorSpace(Vector3 p0, Vector3 p1, Vector3 p2, Color color)
+    {
+        if (Rlgl.CheckRenderBatchLimit(3))
+        {
+            Rlgl.Begin(DrawMode.Triangles);
+        }
+        Vector3 r0 = CoordSpace.ToRightHanded(p0);
+        Vector3 r1 = CoordSpace.ToRightHanded(p1);
+        Vector3 r2 = CoordSpace.ToRightHanded(p2);
+        Rlgl.Color4ub(color.R, color.G, color.B, color.A);
+        Rlgl.Vertex3f(r0.X, r0.Y, r0.Z);
+        Rlgl.Vertex3f(r1.X, r1.Y, r1.Z);
+        Rlgl.Vertex3f(r2.X, r2.Y, r2.Z);
+    }
+
+    private static void DrawEntitiesAndTargetLinks(
+        EditorScene scene,
+        SelectionManager? selection,
+        EntitySchemaRegistry? entityRegistry)
+    {
+        if (scene.Entities.Count == 0)
+        {
+            return;
+        }
+
+        EntitySchemaRegistry registry = entityRegistry ?? EntitySchemaRegistry.Default;
+
+        // 1. Draw Target Link Lines
+        for (int i = 0; i < scene.Entities.Count; i++)
+        {
+            LevelEntity ent = scene.Entities[i];
+            if (!ent.Visible) continue;
+
+            string? targetId = null;
+            if (ent.Properties.TryGet("target_id", out var tVal) && tVal is not null && !string.IsNullOrWhiteSpace(tVal.StringValue))
+            {
+                targetId = tVal.StringValue.Trim();
+            }
+            else if (ent.Properties.TryGet("target", out var tVal2) && tVal2 is not null && !string.IsNullOrWhiteSpace(tVal2.StringValue))
+            {
+                targetId = tVal2.StringValue.Trim();
+            }
+
+            if (!string.IsNullOrEmpty(targetId))
+            {
+                Vector3? targetPos = null;
+                LevelEntity? destEnt = scene.GetEntity(targetId);
+                if (destEnt != null)
+                {
+                    targetPos = destEnt.Transform.Position;
+                }
+                else
+                {
+                    SceneObject? destObj = scene.Objects.FirstOrDefault(o =>
+                        o.Name.Equals(targetId, StringComparison.OrdinalIgnoreCase) ||
+                        o.Id.ToString() == targetId);
+                    if (destObj != null)
+                    {
+                        targetPos = destObj.Transform.Position;
+                    }
+                }
+
+                if (targetPos.HasValue)
+                {
+                    bool isSourceSelected = selection is not null &&
+                        selection.Mode == InteractionMode.Object &&
+                        selection.SelectedEntityIds.Contains(ent.Id);
+
+                    DrawTargetLink(ent.Transform.Position, targetPos.Value, isSourceSelected);
+                }
+            }
+        }
+
+        // 2. Draw Entities
+        for (int i = 0; i < scene.Entities.Count; i++)
+        {
+            LevelEntity ent = scene.Entities[i];
+            if (!ent.Visible) continue;
+
+            bool isSelected = selection is not null &&
+                selection.Mode == InteractionMode.Object &&
+                selection.SelectedEntityIds.Contains(ent.Id);
+
+            registry.TryGetDefinition(ent.ClassName, out EntityDefinition? def);
+            DrawEntityGizmo(ent, def, isSelected, registry);
+        }
+    }
+
+    private static void DrawTargetLink(Vector3 start, Vector3 end, bool isHighlighted)
+    {
+        Vector3 delta = end - start;
+        float dist = delta.Length();
+        if (dist < 0.001f)
+        {
+            return;
+        }
+
+        Vector3 dir = delta / dist;
+        Color lineColor = isHighlighted
+            ? new Color(255, 230, 50, 255)
+            : new Color(0, 230, 255, 200);
+
+        Rlgl.Begin(DrawMode.Lines);
+        EmitLineEditorSpace(start, end, lineColor);
+
+        Vector3 mid = Vector3.Lerp(start, end, 0.5f);
+        float arrowLen = MathF.Min(0.4f, dist * 0.25f);
+        float arrowWidth = arrowLen * 0.4f;
+
+        Vector3 up = MathF.Abs(dir.Y) > 0.95f ? Vector3.UnitX : Vector3.UnitY;
+        Vector3 tanA = Vector3.Normalize(Vector3.Cross(dir, up));
+        Vector3 tanB = Vector3.Cross(dir, tanA);
+
+        Vector3 tip = mid + (dir * (arrowLen * 0.5f));
+        Vector3 arrowBase = mid - (dir * (arrowLen * 0.5f));
+
+        EmitLineEditorSpace(tip, arrowBase + (tanA * arrowWidth), lineColor);
+        EmitLineEditorSpace(tip, arrowBase - (tanA * arrowWidth), lineColor);
+        EmitLineEditorSpace(tip, arrowBase + (tanB * arrowWidth), lineColor);
+        EmitLineEditorSpace(tip, arrowBase - (tanB * arrowWidth), lineColor);
+        Rlgl.End();
+    }
+
+    private static void DrawEntityGizmo(
+        LevelEntity entity,
+        EntityDefinition? def,
+        bool isSelected,
+        EntitySchemaRegistry registry)
+    {
+        EntityGizmoShape shape = def?.GizmoShape ?? InferGizmoShape(entity.ClassName);
+        Color baseColor = GetEntityColor(entity, def);
+
+        if (isSelected)
+        {
+            BoundingBox3D bounds = entity.GetWorldBounds(registry);
+            Color selColor = new(255, 140, 30, 255);
+            DrawWireBoundingBox(bounds, selColor);
+        }
+
+        switch (shape)
+        {
+            case EntityGizmoShape.CapsuleWithArrow:
+            case EntityGizmoShape.Capsule:
+                DrawCapsuleGizmo(entity, baseColor, withArrow: shape == EntityGizmoShape.CapsuleWithArrow);
+                break;
+
+            case EntityGizmoShape.LightGizmo:
+                DrawLightGizmo(entity, baseColor, isSelected);
+                break;
+
+            case EntityGizmoShape.BoxVolume:
+            case EntityGizmoShape.Box:
+                DrawBoxGizmo(entity, def, baseColor, isVolume: shape == EntityGizmoShape.BoxVolume);
+                break;
+
+            case EntityGizmoShape.Sphere:
+                DrawSphereGizmo(entity, def, baseColor);
+                break;
+
+            case EntityGizmoShape.Arrow:
+                DrawArrowGizmo(entity, baseColor);
+                break;
+
+            case EntityGizmoShape.Point:
+            default:
+                DrawPointGizmo(entity, baseColor);
+                break;
+        }
+    }
+
+    private static EntityGizmoShape InferGizmoShape(string className)
+    {
+        if (className.Equals("player_spawn", StringComparison.OrdinalIgnoreCase)) return EntityGizmoShape.CapsuleWithArrow;
+        if (className.Equals("light", StringComparison.OrdinalIgnoreCase)) return EntityGizmoShape.LightGizmo;
+        if (className.Equals("portal", StringComparison.OrdinalIgnoreCase) || className.Equals("trigger", StringComparison.OrdinalIgnoreCase)) return EntityGizmoShape.BoxVolume;
+        return EntityGizmoShape.Box;
+    }
+
+    private static Color GetEntityColor(LevelEntity entity, EntityDefinition? def)
+    {
+        if (entity.Properties.TryGet("color", out var colVal) && colVal is not null && colVal.Type == MetadataValueType.Color)
+        {
+            ColorRgba c = colVal.ColorValue;
+            return new Color(c.R, c.G, c.B, c.A);
+        }
+
+        if (def is not null)
+        {
+            return new Color(def.Color.R, def.Color.G, def.Color.B, def.Color.A);
+        }
+
+        if (entity.ClassName.Equals("player_spawn", StringComparison.OrdinalIgnoreCase))
+        {
+            return new Color(60, 220, 80, 255);
+        }
+        if (entity.ClassName.Equals("light", StringComparison.OrdinalIgnoreCase))
+        {
+            return new Color(255, 240, 210, 255);
+        }
+        if (entity.ClassName.Equals("portal", StringComparison.OrdinalIgnoreCase))
+        {
+            return new Color(0, 220, 240, 255);
+        }
+        if (entity.ClassName.Equals("trigger", StringComparison.OrdinalIgnoreCase))
+        {
+            return new Color(240, 200, 40, 255);
+        }
+
+        return new Color(200, 200, 200, 255);
+    }
+
+    private static void DrawCapsuleGizmo(LevelEntity entity, Color baseColor, bool withArrow)
+    {
+        float h = 1.8f;
+        float r = 0.4f;
+        float halfH = h * 0.5f;
+        float capY = halfH - r;
+
+        // Cap rings
+        DrawLocalCircle(entity, new Vector3(0.0f, capY, 0.0f), Vector3.UnitY, r, baseColor);
+        DrawLocalCircle(entity, new Vector3(0.0f, -capY, 0.0f), Vector3.UnitY, r, baseColor);
+
+        // 4 vertical connecting struts
+        Rlgl.Begin(DrawMode.Lines);
+        EmitLineEditorSpace(entity.Transform.TransformPointToWorld(new Vector3(r, capY, 0.0f)), entity.Transform.TransformPointToWorld(new Vector3(r, -capY, 0.0f)), baseColor);
+        EmitLineEditorSpace(entity.Transform.TransformPointToWorld(new Vector3(-r, capY, 0.0f)), entity.Transform.TransformPointToWorld(new Vector3(-r, -capY, 0.0f)), baseColor);
+        EmitLineEditorSpace(entity.Transform.TransformPointToWorld(new Vector3(0.0f, capY, r)), entity.Transform.TransformPointToWorld(new Vector3(0.0f, -capY, r)), baseColor);
+        EmitLineEditorSpace(entity.Transform.TransformPointToWorld(new Vector3(0.0f, capY, -r)), entity.Transform.TransformPointToWorld(new Vector3(0.0f, -capY, -r)), baseColor);
+        Rlgl.End();
+
+        // Top dome arcs
+        DrawLocalArc(entity, new Vector3(0.0f, capY, 0.0f), Vector3.UnitX, Vector3.UnitY, r, 0.0f, MathF.PI, baseColor);
+        DrawLocalArc(entity, new Vector3(0.0f, capY, 0.0f), Vector3.UnitZ, Vector3.UnitY, r, 0.0f, MathF.PI, baseColor);
+
+        // Bottom dome arcs
+        DrawLocalArc(entity, new Vector3(0.0f, -capY, 0.0f), Vector3.UnitX, Vector3.UnitY, r, MathF.PI, MathF.Tau, baseColor);
+        DrawLocalArc(entity, new Vector3(0.0f, -capY, 0.0f), Vector3.UnitZ, Vector3.UnitY, r, MathF.PI, MathF.Tau, baseColor);
+
+        if (withArrow)
+        {
+            Vector3 chest = new(0.0f, 0.2f, 0.0f);
+            Vector3 tip = chest + new Vector3(0.0f, 0.0f, r + 0.35f);
+            Vector3 wChest = entity.Transform.TransformPointToWorld(chest);
+            Vector3 wTip = entity.Transform.TransformPointToWorld(tip);
+            Vector3 wWingL = entity.Transform.TransformPointToWorld(tip + new Vector3(-0.09f, 0.0f, -0.15f));
+            Vector3 wWingR = entity.Transform.TransformPointToWorld(tip + new Vector3(0.09f, 0.0f, -0.15f));
+
+            Rlgl.Begin(DrawMode.Lines);
+            EmitLineEditorSpace(wChest, wTip, baseColor);
+            EmitLineEditorSpace(wTip, wWingL, baseColor);
+            EmitLineEditorSpace(wTip, wWingR, baseColor);
+            Rlgl.End();
+        }
+    }
+
+    private static void DrawLightGizmo(LevelEntity entity, Color baseColor, bool isSelected)
+    {
+        float s = 0.25f;
+        Vector3 vTop = entity.Transform.TransformPointToWorld(new Vector3(0.0f, s, 0.0f));
+        Vector3 vBot = entity.Transform.TransformPointToWorld(new Vector3(0.0f, -s, 0.0f));
+        Vector3 vR = entity.Transform.TransformPointToWorld(new Vector3(s, 0.0f, 0.0f));
+        Vector3 vL = entity.Transform.TransformPointToWorld(new Vector3(-s, 0.0f, 0.0f));
+        Vector3 vF = entity.Transform.TransformPointToWorld(new Vector3(0.0f, 0.0f, s));
+        Vector3 vB = entity.Transform.TransformPointToWorld(new Vector3(0.0f, 0.0f, -s));
+
+        Color fillCol = new(baseColor.R, baseColor.G, baseColor.B, (byte)70);
+        EmitTriangleEditorSpace(vTop, vR, vF, fillCol);
+        EmitTriangleEditorSpace(vTop, vF, vL, fillCol);
+        EmitTriangleEditorSpace(vTop, vL, vB, fillCol);
+        EmitTriangleEditorSpace(vTop, vB, vR, fillCol);
+        EmitTriangleEditorSpace(vBot, vF, vR, fillCol);
+        EmitTriangleEditorSpace(vBot, vL, vF, fillCol);
+        EmitTriangleEditorSpace(vBot, vB, vL, fillCol);
+        EmitTriangleEditorSpace(vBot, vR, vB, fillCol);
+
+        Rlgl.Begin(DrawMode.Lines);
+        EmitLineEditorSpace(vR, vF, baseColor);
+        EmitLineEditorSpace(vF, vL, baseColor);
+        EmitLineEditorSpace(vL, vB, baseColor);
+        EmitLineEditorSpace(vB, vR, baseColor);
+
+        EmitLineEditorSpace(vTop, vR, baseColor);
+        EmitLineEditorSpace(vTop, vF, baseColor);
+        EmitLineEditorSpace(vTop, vL, baseColor);
+        EmitLineEditorSpace(vTop, vB, baseColor);
+
+        EmitLineEditorSpace(vBot, vR, baseColor);
+        EmitLineEditorSpace(vBot, vF, baseColor);
+        EmitLineEditorSpace(vBot, vL, baseColor);
+        EmitLineEditorSpace(vBot, vB, baseColor);
+        Rlgl.End();
+
+        if (isSelected)
+        {
+            string lightType = "point";
+            if (entity.Properties.TryGet("light_type", out var lt) && lt is not null && !string.IsNullOrWhiteSpace(lt.StringValue))
+            {
+                lightType = lt.StringValue;
+            }
+
+            float radius = 12.0f;
+            if (entity.Properties.TryGet("radius", out var rVal) && rVal is not null && rVal.Type == MetadataValueType.Float)
+            {
+                radius = rVal.FloatValue;
+            }
+
+            Color rangeColor = new(baseColor.R, baseColor.G, baseColor.B, (byte)130);
+
+            if (lightType.Equals("spot", StringComparison.OrdinalIgnoreCase))
+            {
+                float spotAngle = 45.0f;
+                if (entity.Properties.TryGet("spot_angle", out var saVal) && saVal is not null && saVal.Type == MetadataValueType.Float)
+                {
+                    spotAngle = saVal.FloatValue;
+                }
+
+                float halfAngleRad = (spotAngle * 0.5f) * (MathF.PI / 180.0f);
+                float coneBaseRadius = radius * MathF.Tan(halfAngleRad);
+
+                DrawLocalCircle(entity, new Vector3(0.0f, 0.0f, radius), Vector3.UnitZ, coneBaseRadius, rangeColor);
+
+                Vector3 wApex = entity.Transform.Position;
+                Vector3 wC0 = entity.Transform.TransformPointToWorld(new Vector3(coneBaseRadius, 0.0f, radius));
+                Vector3 wC1 = entity.Transform.TransformPointToWorld(new Vector3(-coneBaseRadius, 0.0f, radius));
+                Vector3 wC2 = entity.Transform.TransformPointToWorld(new Vector3(0.0f, coneBaseRadius, radius));
+                Vector3 wC3 = entity.Transform.TransformPointToWorld(new Vector3(0.0f, -coneBaseRadius, radius));
+                Vector3 wCenter = entity.Transform.TransformPointToWorld(new Vector3(0.0f, 0.0f, radius));
+
+                Rlgl.Begin(DrawMode.Lines);
+                EmitLineEditorSpace(wApex, wC0, rangeColor);
+                EmitLineEditorSpace(wApex, wC1, rangeColor);
+                EmitLineEditorSpace(wApex, wC2, rangeColor);
+                EmitLineEditorSpace(wApex, wC3, rangeColor);
+                EmitLineEditorSpace(wApex, wCenter, rangeColor);
+                Rlgl.End();
+            }
+            else
+            {
+                DrawWorldCircle(entity.Transform.Position, Vector3.UnitX, Vector3.UnitY, radius, rangeColor);
+                DrawWorldCircle(entity.Transform.Position, Vector3.UnitX, Vector3.UnitZ, radius, rangeColor);
+                DrawWorldCircle(entity.Transform.Position, Vector3.UnitY, Vector3.UnitZ, radius, rangeColor);
+            }
+        }
+    }
+
+    private static void DrawBoxGizmo(LevelEntity entity, EntityDefinition? def, Color baseColor, bool isVolume)
+    {
+        Vector3 size = def?.Size ?? Vector3.One;
+        if (entity.Properties.TryGet("size", out var sVal) && sVal is not null && sVal.Type == MetadataValueType.Vec3)
+        {
+            size = sVal.Vec3Value;
+        }
+
+        Vector3 half = size * 0.5f;
+
+        Vector3 p0 = entity.Transform.TransformPointToWorld(new Vector3(-half.X, -half.Y, -half.Z));
+        Vector3 p1 = entity.Transform.TransformPointToWorld(new Vector3( half.X, -half.Y, -half.Z));
+        Vector3 p2 = entity.Transform.TransformPointToWorld(new Vector3( half.X,  half.Y, -half.Z));
+        Vector3 p3 = entity.Transform.TransformPointToWorld(new Vector3(-half.X,  half.Y, -half.Z));
+        Vector3 p4 = entity.Transform.TransformPointToWorld(new Vector3(-half.X, -half.Y,  half.Z));
+        Vector3 p5 = entity.Transform.TransformPointToWorld(new Vector3( half.X, -half.Y,  half.Z));
+        Vector3 p6 = entity.Transform.TransformPointToWorld(new Vector3( half.X,  half.Y,  half.Z));
+        Vector3 p7 = entity.Transform.TransformPointToWorld(new Vector3(-half.X,  half.Y,  half.Z));
+
+        if (isVolume)
+        {
+            Color fillCol = new(baseColor.R, baseColor.G, baseColor.B, (byte)50);
+            EmitTriangleEditorSpace(p0, p2, p1, fillCol);
+            EmitTriangleEditorSpace(p0, p3, p2, fillCol);
+            EmitTriangleEditorSpace(p4, p5, p6, fillCol);
+            EmitTriangleEditorSpace(p4, p6, p7, fillCol);
+            EmitTriangleEditorSpace(p0, p1, p5, fillCol);
+            EmitTriangleEditorSpace(p0, p5, p4, fillCol);
+            EmitTriangleEditorSpace(p3, p6, p2, fillCol);
+            EmitTriangleEditorSpace(p3, p7, p6, fillCol);
+            EmitTriangleEditorSpace(p0, p4, p7, fillCol);
+            EmitTriangleEditorSpace(p0, p7, p3, fillCol);
+            EmitTriangleEditorSpace(p1, p2, p6, fillCol);
+            EmitTriangleEditorSpace(p1, p6, p5, fillCol);
+        }
+
+        Rlgl.Begin(DrawMode.Lines);
+        EmitLineEditorSpace(p0, p1, baseColor);
+        EmitLineEditorSpace(p1, p5, baseColor);
+        EmitLineEditorSpace(p5, p4, baseColor);
+        EmitLineEditorSpace(p4, p0, baseColor);
+
+        EmitLineEditorSpace(p3, p2, baseColor);
+        EmitLineEditorSpace(p2, p6, baseColor);
+        EmitLineEditorSpace(p6, p7, baseColor);
+        EmitLineEditorSpace(p7, p3, baseColor);
+
+        EmitLineEditorSpace(p0, p3, baseColor);
+        EmitLineEditorSpace(p1, p2, baseColor);
+        EmitLineEditorSpace(p5, p6, baseColor);
+        EmitLineEditorSpace(p4, p7, baseColor);
+        Rlgl.End();
+    }
+
+    private static void DrawSphereGizmo(LevelEntity entity, EntityDefinition? def, Color baseColor)
+    {
+        Vector3 size = def?.Size ?? Vector3.One;
+        float radius = MathF.Max(0.1f, size.X * 0.5f);
+
+        DrawLocalCircle(entity, Vector3.Zero, Vector3.UnitX, radius, baseColor);
+        DrawLocalCircle(entity, Vector3.Zero, Vector3.UnitY, radius, baseColor);
+        DrawLocalCircle(entity, Vector3.Zero, Vector3.UnitZ, radius, baseColor);
+    }
+
+    private static void DrawArrowGizmo(LevelEntity entity, Color baseColor)
+    {
+        Vector3 start = entity.Transform.TransformPointToWorld(new Vector3(0.0f, 0.0f, -0.5f));
+        Vector3 end = entity.Transform.TransformPointToWorld(new Vector3(0.0f, 0.0f, 0.5f));
+        Vector3 wingA = entity.Transform.TransformPointToWorld(new Vector3(0.15f, 0.0f, 0.3f));
+        Vector3 wingB = entity.Transform.TransformPointToWorld(new Vector3(-0.15f, 0.0f, 0.3f));
+        Vector3 wingC = entity.Transform.TransformPointToWorld(new Vector3(0.0f, 0.15f, 0.3f));
+        Vector3 wingD = entity.Transform.TransformPointToWorld(new Vector3(0.0f, -0.15f, 0.3f));
+
+        Rlgl.Begin(DrawMode.Lines);
+        EmitLineEditorSpace(start, end, baseColor);
+        EmitLineEditorSpace(end, wingA, baseColor);
+        EmitLineEditorSpace(end, wingB, baseColor);
+        EmitLineEditorSpace(end, wingC, baseColor);
+        EmitLineEditorSpace(end, wingD, baseColor);
+        Rlgl.End();
+    }
+
+    private static void DrawPointGizmo(LevelEntity entity, Color baseColor)
+    {
+        const float len = 0.3f;
+        Vector3 x0 = entity.Transform.TransformPointToWorld(new Vector3(-len, 0.0f, 0.0f));
+        Vector3 x1 = entity.Transform.TransformPointToWorld(new Vector3(len, 0.0f, 0.0f));
+        Vector3 y0 = entity.Transform.TransformPointToWorld(new Vector3(0.0f, -len, 0.0f));
+        Vector3 y1 = entity.Transform.TransformPointToWorld(new Vector3(0.0f, len, 0.0f));
+        Vector3 z0 = entity.Transform.TransformPointToWorld(new Vector3(0.0f, 0.0f, -len));
+        Vector3 z1 = entity.Transform.TransformPointToWorld(new Vector3(0.0f, 0.0f, len));
+
+        Rlgl.Begin(DrawMode.Lines);
+        EmitLineEditorSpace(x0, x1, baseColor);
+        EmitLineEditorSpace(y0, y1, baseColor);
+        EmitLineEditorSpace(z0, z1, baseColor);
+        Rlgl.End();
+    }
+
+    private static void DrawWireBoundingBox(BoundingBox3D bounds, Color color)
+    {
+        Vector3 min = bounds.Min;
+        Vector3 max = bounds.Max;
+
+        Vector3 p0 = new(min.X, min.Y, min.Z);
+        Vector3 p1 = new(max.X, min.Y, min.Z);
+        Vector3 p2 = new(max.X, max.Y, min.Z);
+        Vector3 p3 = new(min.X, max.Y, min.Z);
+        Vector3 p4 = new(min.X, min.Y, max.Z);
+        Vector3 p5 = new(max.X, min.Y, max.Z);
+        Vector3 p6 = new(max.X, max.Y, max.Z);
+        Vector3 p7 = new(min.X, max.Y, max.Z);
+
+        Rlgl.Begin(DrawMode.Lines);
+        EmitLineEditorSpace(p0, p1, color);
+        EmitLineEditorSpace(p1, p5, color);
+        EmitLineEditorSpace(p5, p4, color);
+        EmitLineEditorSpace(p4, p0, color);
+
+        EmitLineEditorSpace(p3, p2, color);
+        EmitLineEditorSpace(p2, p6, color);
+        EmitLineEditorSpace(p6, p7, color);
+        EmitLineEditorSpace(p7, p3, color);
+
+        EmitLineEditorSpace(p0, p3, color);
+        EmitLineEditorSpace(p1, p2, color);
+        EmitLineEditorSpace(p5, p6, color);
+        EmitLineEditorSpace(p4, p7, color);
+        Rlgl.End();
+    }
+
+    private static void DrawLocalCircle(LevelEntity entity, Vector3 centerLocal, Vector3 normalLocal, float radius, Color color, int segments = 24)
+    {
+        Vector3 up = MathF.Abs(normalLocal.Y) > 0.95f ? Vector3.UnitX : Vector3.UnitY;
+        Vector3 tanA = Vector3.Normalize(Vector3.Cross(normalLocal, up));
+        Vector3 tanB = Vector3.Cross(normalLocal, tanA);
+
+        Rlgl.Begin(DrawMode.Lines);
+        for (int i = 0; i < segments; i++)
+        {
+            float a0 = (i / (float)segments) * MathF.Tau;
+            float a1 = ((i + 1) / (float)segments) * MathF.Tau;
+
+            Vector3 l0 = centerLocal + (((tanA * MathF.Cos(a0)) + (tanB * MathF.Sin(a0))) * radius);
+            Vector3 l1 = centerLocal + (((tanA * MathF.Cos(a1)) + (tanB * MathF.Sin(a1))) * radius);
+
+            Vector3 w0 = entity.Transform.TransformPointToWorld(l0);
+            Vector3 w1 = entity.Transform.TransformPointToWorld(l1);
+
+            EmitLineEditorSpace(w0, w1, color);
+        }
+        Rlgl.End();
+    }
+
+    private static void DrawLocalArc(LevelEntity entity, Vector3 centerLocal, Vector3 tanA, Vector3 tanB, float radius, float startAngle, float endAngle, Color color, int segments = 12)
+    {
+        Rlgl.Begin(DrawMode.Lines);
+        for (int i = 0; i < segments; i++)
+        {
+            float t0 = (float)i / segments;
+            float t1 = (float)(i + 1) / segments;
+            float a0 = startAngle + (t0 * (endAngle - startAngle));
+            float a1 = startAngle + (t1 * (endAngle - startAngle));
+
+            Vector3 l0 = centerLocal + (((tanA * MathF.Cos(a0)) + (tanB * MathF.Sin(a0))) * radius);
+            Vector3 l1 = centerLocal + (((tanA * MathF.Cos(a1)) + (tanB * MathF.Sin(a1))) * radius);
+
+            Vector3 w0 = entity.Transform.TransformPointToWorld(l0);
+            Vector3 w1 = entity.Transform.TransformPointToWorld(l1);
+
+            EmitLineEditorSpace(w0, w1, color);
+        }
+        Rlgl.End();
+    }
+
+    private static void DrawWorldCircle(Vector3 centerWorld, Vector3 tanA, Vector3 tanB, float radius, Color color, int segments = 32)
+    {
+        Rlgl.Begin(DrawMode.Lines);
+        for (int i = 0; i < segments; i++)
+        {
+            float a0 = (i / (float)segments) * MathF.Tau;
+            float a1 = ((i + 1) / (float)segments) * MathF.Tau;
+
+            Vector3 w0 = centerWorld + (((tanA * MathF.Cos(a0)) + (tanB * MathF.Sin(a0))) * radius);
+            Vector3 w1 = centerWorld + (((tanA * MathF.Cos(a1)) + (tanB * MathF.Sin(a1))) * radius);
+
+            EmitLineEditorSpace(w0, w1, color);
+        }
+        Rlgl.End();
     }
 
     public void Dispose()

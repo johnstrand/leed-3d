@@ -1,5 +1,6 @@
 using System.Numerics;
 using ImGuiNET;
+using Leed3D.Kernel.Entities;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Scene;
 using Leed3D.Kernel.Selection;
@@ -32,11 +33,18 @@ public sealed class MetadataInspectorPanel
 
         ImGui.Begin("Metadata Inspector");
 
+        if (app.Selection.Mode == InteractionMode.Object && app.Selection.SelectedEntityIds.Count > 0)
+        {
+            DrawEntityInspector(app);
+            ImGui.End();
+            return;
+        }
+
         List<ElementMetadata> targets = GetTargetMetadatas(app, out string targetDescription, out int targetCount);
 
         if (targets.Count == 0)
         {
-            ImGui.TextDisabled("Select an object, face, edge, or vertex to inspect metadata.");
+            ImGui.TextDisabled("Select an object, face, edge, vertex, or entity to inspect metadata.");
             ImGui.End();
             return;
         }
@@ -74,6 +82,360 @@ public sealed class MetadataInspectorPanel
         DrawPropertiesSection(app, primary);
 
         ImGui.End();
+    }
+
+    private void DrawEntityInspector(EditorApp app)
+    {
+        string? primaryId = app.Selection.ActiveEntityId ?? app.Selection.SelectedEntityIds.FirstOrDefault();
+        if (primaryId is null || app.Scene.GetEntity(primaryId) is not { } entity)
+        {
+            ImGui.TextDisabled("Selected entity no longer exists.");
+            return;
+        }
+
+        int selectedCount = app.Selection.SelectedEntityIds.Count;
+
+        // Header
+        ImGui.TextColored(new Vector4(0.3f, 0.9f, 0.5f, 1.0f), $"Entity: {entity.ClassName}");
+        if (selectedCount > 1)
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled($"({selectedCount} selected)");
+        }
+
+        ImGui.Separator();
+
+        // 1. Identity (ID & ClassName)
+        ImGui.TextDisabled("Identity:");
+        string id = entity.Id;
+        ImGui.SetNextItemWidth(200.0f);
+        if (ImGui.InputText("ID##EntityId", ref id, 64, ImGuiInputTextFlags.EnterReturnsTrue))
+        {
+            RenameEntity(app, entity, id);
+        }
+
+        ImGui.SetNextItemWidth(200.0f);
+        if (ImGui.BeginCombo("Class##EntityClass", entity.ClassName))
+        {
+            foreach (var def in app.EntityRegistry.Definitions)
+            {
+                bool isSelected = def.ClassName.Equals(entity.ClassName, StringComparison.OrdinalIgnoreCase);
+                if (ImGui.Selectable($"{def.DisplayName} ({def.ClassName})", isSelected))
+                {
+                    if (!isSelected)
+                    {
+                        EditorScene before = app.Scene.CloneSnapshot();
+                        entity.ClassName = def.ClassName;
+                        foreach (var (k, v) in def.DefaultProperties.Properties)
+                        {
+                            if (!entity.Properties.Properties.ContainsKey(k))
+                            {
+                                entity.Properties.SetProperty(k, v);
+                            }
+                        }
+                        app.UndoStack.RecordAction($"Change Entity '{entity.Id}' Class to '{def.ClassName}'", before, app.Scene);
+                    }
+                }
+                if (isSelected)
+                {
+                    ImGui.SetItemDefaultFocus();
+                }
+            }
+            ImGui.EndCombo();
+        }
+
+        ImGui.Separator();
+
+        // 2. Transform
+        ImGui.TextDisabled("Transform:");
+
+        Vector3 pos = entity.Transform.Position;
+        ImGui.SetNextItemWidth(200.0f);
+        if (ImGui.DragFloat3("Position##EntPos", ref pos, 0.05f))
+        {
+            RecordEntityMutation(app, $"Move Entity '{entity.Id}'", e => e.Transform.Position = pos);
+        }
+
+        Vector3 rot = entity.Transform.RotationEulerDegrees;
+        ImGui.SetNextItemWidth(200.0f);
+        if (ImGui.DragFloat3("Rotation##EntRot", ref rot, 1.0f))
+        {
+            RecordEntityMutation(app, $"Rotate Entity '{entity.Id}'", e =>
+            {
+                e.Transform.RotationEulerDegrees = rot;
+                if (e.ClassName.Equals("player_spawn", StringComparison.OrdinalIgnoreCase) && e.Properties.Properties.ContainsKey("yaw"))
+                {
+                    e.Properties.SetFloat("yaw", rot.Y);
+                }
+            });
+        }
+
+        Vector3 scale = entity.Transform.Scale;
+        ImGui.SetNextItemWidth(200.0f);
+        if (ImGui.DragFloat3("Scale##EntScale", ref scale, 0.05f))
+        {
+            RecordEntityMutation(app, $"Scale Entity '{entity.Id}'", e => e.Transform.Scale = scale);
+        }
+
+        ImGui.Separator();
+
+        // 3. Class-Specific Fields & Target Linking
+        ImGui.TextDisabled("Class-Specific Fields:");
+
+        // Target Link combo (for portal, trigger, or any entity with target_id/target)
+        if (entity.ClassName is "portal" or "trigger" || entity.Properties.Properties.ContainsKey("target_id") || entity.Properties.Properties.ContainsKey("target"))
+        {
+            string currentTarget = string.Empty;
+            if (entity.Properties.TryGet("target_id", out var tv) && tv is not null)
+            {
+                currentTarget = tv.StringValue;
+            }
+            else if (entity.Properties.TryGet("target", out var tv2) && tv2 is not null)
+            {
+                currentTarget = tv2.StringValue;
+            }
+
+            ImGui.SetNextItemWidth(200.0f);
+            if (ImGui.BeginCombo("Target Link##EntTargetCombo", string.IsNullOrEmpty(currentTarget) ? "(None)" : currentTarget))
+            {
+                if (ImGui.Selectable("(None)", string.IsNullOrEmpty(currentTarget)))
+                {
+                    RecordEntityMutation(app, "Clear Target", e =>
+                    {
+                        e.Properties.SetString("target_id", string.Empty);
+                        e.Properties.RemoveProperty("target");
+                    });
+                }
+
+                if (app.Scene.Entities.Count > 1)
+                {
+                    ImGui.Separator();
+                    ImGui.TextDisabled("Entities:");
+                    foreach (var otherEnt in app.Scene.Entities)
+                    {
+                        if (otherEnt == entity) continue;
+                        bool isSel = otherEnt.Id == currentTarget;
+                        if (ImGui.Selectable($"{otherEnt.Id} ({otherEnt.ClassName})##targetEnt", isSel))
+                        {
+                            RecordEntityMutation(app, $"Set Target to '{otherEnt.Id}'", e =>
+                            {
+                                e.Properties.SetString("target_id", otherEnt.Id);
+                            });
+                        }
+                    }
+                }
+
+                if (app.Scene.Objects.Count > 0)
+                {
+                    ImGui.Separator();
+                    ImGui.TextDisabled("Scene Objects:");
+                    foreach (var obj in app.Scene.Objects)
+                    {
+                        bool isSel = obj.Name == currentTarget || obj.Id.ToString() == currentTarget;
+                        if (ImGui.Selectable($"{obj.Name} [#{obj.Id}]##targetObj", isSel))
+                        {
+                            RecordEntityMutation(app, $"Set Target to '{obj.Name}'", e =>
+                            {
+                                e.Properties.SetString("target_id", obj.Name);
+                            });
+                        }
+                    }
+                }
+
+                ImGui.EndCombo();
+            }
+
+            ImGui.SetNextItemWidth(200.0f);
+            string editTarget = currentTarget;
+            if (ImGui.InputText("Custom Target ID##EntCustomTarget", ref editTarget, 64, ImGuiInputTextFlags.EnterReturnsTrue))
+            {
+                RecordEntityMutation(app, $"Set Target to '{editTarget}'", e =>
+                {
+                    e.Properties.SetString("target_id", editTarget.Trim());
+                });
+            }
+        }
+
+        // player_spawn specific
+        if (entity.ClassName.Equals("player_spawn", StringComparison.OrdinalIgnoreCase))
+        {
+            int team = 0;
+            if (entity.Properties.TryGet("team", out var teamVal) && teamVal is not null)
+            {
+                team = teamVal.IntValue;
+            }
+
+            ImGui.SetNextItemWidth(120.0f);
+            if (ImGui.DragInt("Team##PlayerTeam", ref team, 1, 0, 16))
+            {
+                RecordEntityMutation(app, "Set Spawn Team", e => e.Properties.SetInt("team", team));
+            }
+
+            float yaw = entity.Transform.RotationEulerDegrees.Y;
+            if (entity.Properties.TryGet("yaw", out var yawVal) && yawVal is not null)
+            {
+                yaw = yawVal.FloatValue;
+            }
+
+            ImGui.SetNextItemWidth(120.0f);
+            if (ImGui.DragFloat("Yaw Facing##PlayerYaw", ref yaw, 1.0f, -360.0f, 360.0f))
+            {
+                RecordEntityMutation(app, "Set Spawn Yaw", e =>
+                {
+                    e.Properties.SetFloat("yaw", yaw);
+                    e.Transform.RotationEulerDegrees = new Vector3(e.Transform.RotationEulerDegrees.X, yaw, e.Transform.RotationEulerDegrees.Z);
+                });
+            }
+        }
+
+        // light specific
+        if (entity.ClassName.Equals("light", StringComparison.OrdinalIgnoreCase))
+        {
+            string lightType = "point";
+            if (entity.Properties.TryGet("light_type", out var ltVal) && ltVal is not null)
+            {
+                lightType = ltVal.StringValue;
+            }
+
+            ImGui.SetNextItemWidth(120.0f);
+            if (ImGui.BeginCombo("Light Type##LightTypeCombo", lightType))
+            {
+                if (ImGui.Selectable("point", lightType == "point"))
+                {
+                    RecordEntityMutation(app, "Set Light Type to point", e => e.Properties.SetString("light_type", "point"));
+                }
+                if (ImGui.Selectable("spot", lightType == "spot"))
+                {
+                    RecordEntityMutation(app, "Set Light Type to spot", e => e.Properties.SetString("light_type", "spot"));
+                }
+                ImGui.EndCombo();
+            }
+
+            ColorRgba c = new(255, 240, 210, 255);
+            if (entity.Properties.TryGet("color", out var cVal) && cVal is not null)
+            {
+                c = cVal.ColorValue;
+            }
+
+            Vector4 colVec = new(c.R / 255.0f, c.G / 255.0f, c.B / 255.0f, c.A / 255.0f);
+            ImGui.SetNextItemWidth(180.0f);
+            if (ImGui.ColorEdit4("Color##LightColor", ref colVec, ImGuiColorEditFlags.NoInputs))
+            {
+                ColorRgba updated = new(
+                    (byte)System.Math.Clamp((int)(colVec.X * 255f), 0, 255),
+                    (byte)System.Math.Clamp((int)(colVec.Y * 255f), 0, 255),
+                    (byte)System.Math.Clamp((int)(colVec.Z * 255f), 0, 255),
+                    (byte)System.Math.Clamp((int)(colVec.W * 255f), 0, 255));
+                RecordEntityMutation(app, "Set Light Color", e => e.Properties.SetColor("color", updated));
+            }
+
+            float intensity = 1.5f;
+            if (entity.Properties.TryGet("intensity", out var intVal) && intVal is not null)
+            {
+                intensity = intVal.FloatValue;
+            }
+
+            ImGui.SetNextItemWidth(120.0f);
+            if (ImGui.DragFloat("Intensity##LightIntensity", ref intensity, 0.05f, 0.0f, 100.0f))
+            {
+                RecordEntityMutation(app, "Set Light Intensity", e => e.Properties.SetFloat("intensity", intensity));
+            }
+
+            float radius = 12.0f;
+            if (entity.Properties.TryGet("radius", out var radVal) && radVal is not null)
+            {
+                radius = radVal.FloatValue;
+            }
+
+            ImGui.SetNextItemWidth(120.0f);
+            if (ImGui.DragFloat("Radius##LightRadius", ref radius, 0.25f, 0.1f, 512.0f))
+            {
+                RecordEntityMutation(app, "Set Light Radius", e => e.Properties.SetFloat("radius", radius));
+            }
+
+            if (lightType.Equals("spot", StringComparison.OrdinalIgnoreCase))
+            {
+                float spotAngle = 45.0f;
+                if (entity.Properties.TryGet("spot_angle", out var saVal) && saVal is not null)
+                {
+                    spotAngle = saVal.FloatValue;
+                }
+
+                ImGui.SetNextItemWidth(120.0f);
+                if (ImGui.DragFloat("Spot Angle##LightSpotAngle", ref spotAngle, 0.5f, 1.0f, 179.0f))
+                {
+                    RecordEntityMutation(app, "Set Spot Angle", e => e.Properties.SetFloat("spot_angle", spotAngle));
+                }
+            }
+        }
+
+        // portal / trigger specific
+        if (entity.ClassName is "portal" or "trigger")
+        {
+            string eventName = entity.ClassName == "portal" ? "teleport" : "trigger_enter";
+            if (entity.Properties.TryGet("event_name", out var evVal) && evVal is not null)
+            {
+                eventName = evVal.StringValue;
+            }
+
+            ImGui.SetNextItemWidth(180.0f);
+            if (ImGui.InputText("Event Name##TriggerEvent", ref eventName, 64, ImGuiInputTextFlags.EnterReturnsTrue))
+            {
+                RecordEntityMutation(app, "Set Event Name", e => e.Properties.SetString("event_name", eventName.Trim()));
+            }
+
+            bool oneShot = entity.Properties.TryGet("one_shot", out var osVal) && osVal is not null && osVal.BoolValue;
+            if (ImGui.Checkbox("One-Shot##TriggerOneShot", ref oneShot))
+            {
+                RecordEntityMutation(app, "Set One-Shot", e => e.Properties.SetBool("one_shot", oneShot));
+            }
+        }
+
+        ImGui.Separator();
+
+        // 4. Tags Section
+        DrawTagsSection(app, entity.Properties);
+
+        ImGui.Separator();
+
+        // 5. Properties Section
+        DrawPropertiesSection(app, entity.Properties);
+    }
+
+    private static void RenameEntity(EditorApp app, LevelEntity entity, string newId)
+    {
+        if (string.IsNullOrWhiteSpace(newId) || newId == entity.Id) return;
+        newId = newId.Trim();
+        if (app.Scene.Entities.Any(e => e != entity && e.Id.Equals(newId, StringComparison.OrdinalIgnoreCase))) return;
+
+        EditorScene before = app.Scene.CloneSnapshot();
+        string oldId = entity.Id;
+        entity.Id = newId;
+        if (app.Selection.SelectedEntityIds.Contains(oldId))
+        {
+            var updated = app.Selection.SelectedEntityIds.Where(x => x != oldId).Append(newId);
+            app.Selection.SelectMultipleEntities(updated);
+        }
+        if (app.Selection.ActiveEntityId == oldId)
+        {
+            app.Selection.ActiveEntityId = newId;
+        }
+        app.UndoStack.RecordAction($"Rename Entity '{oldId}' to '{newId}'", before, app.Scene);
+        app.StatusMessage = $"Renamed entity to '{newId}'.";
+    }
+
+    private static void RecordEntityMutation(EditorApp app, string description, Action<LevelEntity> action)
+    {
+        EditorScene before = app.Scene.CloneSnapshot();
+        foreach (string entId in app.Selection.SelectedEntityIds)
+        {
+            if (app.Scene.GetEntity(entId) is { } entity)
+            {
+                action(entity);
+            }
+        }
+        app.UndoStack.RecordAction(description, before, app.Scene);
+        app.StatusMessage = $"{description}.";
     }
 
     private void DrawPresetsSection(EditorApp app, List<ElementMetadata> targets)
@@ -378,6 +740,28 @@ public sealed class MetadataInspectorPanel
         {
             case InteractionMode.Object:
             {
+                if (app.Selection.SelectedEntityIds.Count > 0)
+                {
+                    var selEntIds = app.Selection.SelectedEntityIds;
+                    targetCount = selEntIds.Count;
+                    foreach (string entId in selEntIds)
+                    {
+                        if (app.Scene.GetEntity(entId) is { } ent)
+                        {
+                            targets.Add(ent.Properties);
+                        }
+                    }
+
+                    if (targets.Count > 0)
+                    {
+                        LevelEntity primaryEnt = app.Scene.GetEntity(selEntIds.First())!;
+                        targetDescription = targetCount == 1
+                            ? $"Entity: '{primaryEnt.Id}' ({primaryEnt.ClassName})"
+                            : $"Entities ({targetCount} selected)";
+                    }
+                    break;
+                }
+
                 var selObjIds = app.Selection.SelectedObjectIds;
                 targetCount = selObjIds.Count;
                 if (targetCount == 0)

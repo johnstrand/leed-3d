@@ -1,5 +1,6 @@
 using System.Drawing;
 using System.Numerics;
+using Leed3D.Kernel.Entities;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Math;
 using Leed3D.Kernel.Scene;
@@ -12,6 +13,11 @@ namespace Leed3D.Kernel.Selection;
 public readonly record struct ObjectHit(int ObjectId, int FaceId, float Distance, Vector3 HitPoint);
 
 /// <summary>
+/// Result of an entity-level 3D raycast hit.
+/// </summary>
+public readonly record struct EntityHit(string EntityId, float Distance, Vector3 HitPoint);
+
+/// <summary>
 /// Result of a face-level 3D raycast hit on a single object.
 /// </summary>
 public readonly record struct FaceHit(int FaceId, float Distance, Vector3 HitPoint);
@@ -22,6 +28,7 @@ public readonly record struct FaceHit(int FaceId, float Distance, Vector3 HitPoi
 public sealed class MarqueeSelectionResult
 {
     public List<int> ObjectIds { get; } = [];
+    public List<string> EntityIds { get; } = [];
     public List<int> VertexIds { get; } = [];
     public List<EdgeKey> Edges { get; } = [];
     public List<int> FaceIds { get; } = [];
@@ -70,6 +77,40 @@ public static class MeshPicker
             {
                 minDistance = faceHit.Value.Distance;
                 closestHit = new ObjectHit(obj.Id, faceHit.Value.FaceId, faceHit.Value.Distance, faceHit.Value.HitPoint);
+            }
+        }
+
+        return closestHit;
+    }
+
+    /// <summary>
+    /// Performs raycast against all visible, unlocked gameplay entities in <paramref name="scene"/>.
+    /// Returns the closest hit if any.
+    /// </summary>
+    public static EntityHit? PickEntity(EditorScene scene, Ray3D worldRay, EntitySchemaRegistry? registry = null)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+
+        EntityHit? closestHit = null;
+        float minDistance = float.PositiveInfinity;
+
+        foreach (LevelEntity entity in scene.Entities)
+        {
+            if (!entity.Visible || entity.Locked)
+            {
+                continue;
+            }
+
+            BoundingBox3D bounds = entity.GetWorldBounds(registry);
+            if (worldRay.IntersectBoundingBox(bounds, out float tMin, out float tMax))
+            {
+                float hitDist = tMin >= 0 ? tMin : tMax;
+                if (hitDist >= 0 && hitDist < minDistance)
+                {
+                    minDistance = hitDist;
+                    Vector3 hitPoint = worldRay.Origin + (worldRay.Direction * hitDist);
+                    closestHit = new EntityHit(entity.Id, hitDist, hitPoint);
+                }
             }
         }
 
@@ -396,6 +437,43 @@ public static class MeshPicker
             if (sPos.HasValue && IsInside(sPos.Value))
             {
                 result.Add(obj.Id);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Selects all visible, unlocked entities whose projected screen-space origin/center falls inside <paramref name="screenRect"/>.
+    /// </summary>
+    public static List<string> PickEntitiesBoxMarquee(
+        EditorScene scene,
+        RectangleF screenRect,
+        Func<Vector3, Vector2?> worldToScreen)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        ArgumentNullException.ThrowIfNull(worldToScreen);
+
+        var result = new List<string>();
+
+        float minX = System.Math.Min(screenRect.Left, screenRect.Right);
+        float maxX = System.Math.Max(screenRect.Left, screenRect.Right);
+        float minY = System.Math.Min(screenRect.Top, screenRect.Bottom);
+        float maxY = System.Math.Max(screenRect.Top, screenRect.Bottom);
+
+        bool IsInside(Vector2 pt) => pt.X >= minX && pt.X <= maxX && pt.Y >= minY && pt.Y <= maxY;
+
+        foreach (LevelEntity entity in scene.Entities)
+        {
+            if (!entity.Visible || entity.Locked)
+            {
+                continue;
+            }
+
+            Vector2? sPos = worldToScreen(entity.Transform.Position);
+            if (sPos.HasValue && IsInside(sPos.Value))
+            {
+                result.Add(entity.Id);
             }
         }
 

@@ -5,6 +5,7 @@ using Leed3D.Editor.UI;
 using Leed3D.Editor.UI.Panels;
 using Leed3D.Editor.Viewport;
 using Leed3D.Kernel.Csg;
+using Leed3D.Kernel.Entities;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Gizmos;
 using Leed3D.Kernel.Math;
@@ -15,6 +16,7 @@ using Leed3D.Kernel.Selection;
 using Leed3D.Kernel.Texturing;
 using Leed3D.Kernel.Tools;
 using Leed3D.Kernel.Viewport;
+using Leed3D.Runtime.Metadata;
 using Raylib_cs;
 using Color = Raylib_cs.Color;
 using RectangleF = System.Drawing.RectangleF;
@@ -48,6 +50,7 @@ public sealed class EditorApp : IDisposable
     public TextureBrowserPanel TextureBrowser { get; } = new();
     public UvInspectorPanel UvInspector { get; } = new();
     public MetadataInspectorPanel MetadataInspector { get; } = new();
+    public EntitySchemaRegistry EntityRegistry { get; } = new();
 
     public ViewportShadingMode ShadingMode { get; set; } = ViewportShadingMode.SolidWithWireframe;
     public bool SnapToGridEnabled { get; set; } = true;
@@ -98,6 +101,17 @@ public sealed class EditorApp : IDisposable
         TextureCache = new EditorTextureCache(MaterialLibrary);
         PrimitiveController = new PrimitiveCreationController(Scene, UndoStack);
         ShortcutHandler = new EditorShortcutHandler(this);
+        if (File.Exists("entities.schema.json"))
+        {
+            try
+            {
+                EntityRegistry.LoadFromFile("entities.schema.json");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Entities] Failed to load entities.schema.json: {ex.Message}");
+            }
+        }
         InitializeDefaultStarterScene();
     }
 
@@ -138,7 +152,8 @@ public sealed class EditorApp : IDisposable
                 CsgPreviewTargetId,
                 CsgPreviewCutterId,
                 CsgCutterWireColor,
-                TextureCache);
+                TextureCache,
+                EntityRegistry);
 
             Raylib.BeginDrawing();
             Raylib.ClearBackground(new Color(20, 22, 25, 255));
@@ -274,7 +289,18 @@ public sealed class EditorApp : IDisposable
 
         if (ImGui.BeginMenu("Add"))
         {
-            DrawPrimitiveMenuItems();
+            if (ImGui.BeginMenu("Mesh"))
+            {
+                DrawPrimitiveMenuItems();
+                ImGui.EndMenu();
+            }
+
+            if (ImGui.BeginMenu("Entity"))
+            {
+                DrawEntityMenuItems();
+                ImGui.EndMenu();
+            }
+
             ImGui.EndMenu();
         }
 
@@ -371,6 +397,84 @@ public sealed class EditorApp : IDisposable
         _statusMessage = $"Spawned {obj.Name} at ({spawnPos.X:0.#}, {spawnPos.Y:0.#}, {spawnPos.Z:0.#}). Adjust parameters in the overlay panel.";
     }
 
+    private void DrawEntityMenuItems()
+    {
+        if (ImGui.MenuItem("Player Spawn"))
+        {
+            SpawnEntity("player_spawn");
+        }
+        if (ImGui.MenuItem("Light (Point)"))
+        {
+            SpawnEntity("light", ("light_type", "point"));
+        }
+        if (ImGui.MenuItem("Light (Spot)"))
+        {
+            SpawnEntity("light", ("light_type", "spot"));
+        }
+        if (ImGui.MenuItem("Portal"))
+        {
+            SpawnEntity("portal");
+        }
+        if (ImGui.MenuItem("Trigger Volume"))
+        {
+            SpawnEntity("trigger");
+        }
+
+        bool hasCustom = false;
+        foreach (var def in EntityRegistry.Definitions)
+        {
+            if (def.ClassName.Equals("player_spawn", StringComparison.OrdinalIgnoreCase) ||
+                def.ClassName.Equals("light", StringComparison.OrdinalIgnoreCase) ||
+                def.ClassName.Equals("portal", StringComparison.OrdinalIgnoreCase) ||
+                def.ClassName.Equals("trigger", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (!hasCustom)
+            {
+                ImGui.Separator();
+                ImGui.TextDisabled("Custom Entities:");
+                hasCustom = true;
+            }
+
+            if (ImGui.MenuItem(def.DisplayName))
+            {
+                SpawnEntity(def.ClassName);
+            }
+        }
+    }
+
+    public LevelEntity SpawnEntity(string className, params (string Key, object Value)[]? propertyOverrides)
+    {
+        Vector3 spawnPos = Camera.Target;
+        if (SnapToGridEnabled)
+        {
+            spawnPos = GridSnapper.SnapVector(spawnPos, CurrentGridStep);
+        }
+
+        EditorScene before = Scene.CloneSnapshot();
+        LevelEntity entity = Scene.CreateEntity(className, position: spawnPos, registry: EntityRegistry);
+
+        if (propertyOverrides is not null)
+        {
+            foreach (var (k, v) in propertyOverrides)
+            {
+                if (v is float f) entity.Properties.SetFloat(k, f);
+                else if (v is int i) entity.Properties.SetInt(k, i);
+                else if (v is bool b) entity.Properties.SetBool(k, b);
+                else if (v is string s) entity.Properties.SetString(k, s);
+                else if (v is ColorRgba c) entity.Properties.SetColor(k, c);
+                else if (v is Vector3 vec) entity.Properties.SetVec3(k, vec);
+            }
+        }
+
+        UndoStack.RecordAction($"Spawn Entity '{entity.Id}'", before, Scene);
+        Selection.SelectSingleEntity(entity.Id);
+        _statusMessage = $"Spawned Entity '{entity.Id}' ({className}) at ({spawnPos.X:0.#}, {spawnPos.Y:0.#}, {spawnPos.Z:0.#}).";
+        return entity;
+    }
+
     private void DrawViewportWindow(float dt)
     {
         ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(4.0f, 4.0f));
@@ -406,6 +510,10 @@ public sealed class EditorApp : IDisposable
             ImGui.TextDisabled("Add Mesh Primitive");
             ImGui.Separator();
             DrawPrimitiveMenuItems();
+            ImGui.Spacing();
+            ImGui.TextDisabled("Add Gameplay Entity");
+            ImGui.Separator();
+            DrawEntityMenuItems();
             ImGui.EndPopup();
         }
 
@@ -746,6 +854,19 @@ public sealed class EditorApp : IDisposable
             if (ImGui.Button("Geosphere")) SpawnPrimitive(PrimitiveType.Geosphere);
             ImGui.SameLine();
             if (ImGui.Button("Icosahedron")) SpawnPrimitive(PrimitiveType.Icosahedron);
+
+            ImGui.SameLine();
+            ImGui.TextDisabled("| Entity:");
+            ImGui.SameLine();
+            if (ImGui.Button("Spawn")) SpawnEntity("player_spawn");
+            ImGui.SameLine();
+            if (ImGui.Button("Pt Light")) SpawnEntity("light", ("light_type", "point"));
+            ImGui.SameLine();
+            if (ImGui.Button("Spot Light")) SpawnEntity("light", ("light_type", "spot"));
+            ImGui.SameLine();
+            if (ImGui.Button("Portal")) SpawnEntity("portal");
+            ImGui.SameLine();
+            if (ImGui.Button("Trigger")) SpawnEntity("trigger");
         }
         else if (Selection.Mode == InteractionMode.Vertex)
         {
@@ -1231,6 +1352,7 @@ public sealed class EditorApp : IDisposable
         if (Selection.Mode == InteractionMode.Object)
         {
             List<int> picked = MeshPicker.PickObjectsBoxMarquee(Scene, screenRect, worldToScreen);
+            List<string> pickedEntities = MeshPicker.PickEntitiesBoxMarquee(Scene, screenRect, worldToScreen);
             if (!shiftHeld)
             {
                 Selection.ClearSelection();
@@ -1240,8 +1362,12 @@ public sealed class EditorApp : IDisposable
             {
                 Selection.ToggleSelectObject(id);
             }
+            foreach (string entId in pickedEntities)
+            {
+                Selection.ToggleSelectEntity(entId);
+            }
 
-            _statusMessage = $"Box selected {Selection.SelectedObjectIds.Count} object(s).";
+            _statusMessage = $"Box selected {Selection.SelectedObjectIds.Count} object(s), {Selection.SelectedEntityIds.Count} entity/entities.";
         }
         else if (Selection.ActiveObjectId.HasValue && Scene.GetObject(Selection.ActiveObjectId.Value) is { } activeObj)
         {
@@ -1278,7 +1404,33 @@ public sealed class EditorApp : IDisposable
         if (Selection.Mode == InteractionMode.Object)
         {
             ObjectHit? hit = MeshPicker.PickObject(Scene, ray);
-            if (hit.HasValue)
+            EntityHit? entHit = MeshPicker.PickEntity(Scene, ray, EntityRegistry);
+
+            bool pickEntity = false;
+            if (entHit.HasValue && hit.HasValue)
+            {
+                pickEntity = entHit.Value.Distance <= hit.Value.Distance;
+            }
+            else if (entHit.HasValue)
+            {
+                pickEntity = true;
+            }
+
+            if (pickEntity && entHit.HasValue)
+            {
+                if (shiftHeld)
+                {
+                    Selection.ToggleSelectEntity(entHit.Value.EntityId);
+                }
+                else
+                {
+                    Selection.SelectSingleEntity(entHit.Value.EntityId);
+                }
+
+                LevelEntity? ent = Scene.GetEntity(entHit.Value.EntityId);
+                _statusMessage = $"Selected Entity '{ent?.Id ?? "Entity"}' ({ent?.ClassName}). Total: {Selection.SelectedEntityIds.Count}.";
+            }
+            else if (hit.HasValue)
             {
                 if (shiftHeld)
                 {

@@ -1,10 +1,11 @@
 using System.Numerics;
+using Leed3D.Kernel.Entities;
 using Leed3D.Kernel.Geometry;
 
 namespace Leed3D.Kernel.Scene;
 
 /// <summary>
-/// Container for all objects in a level being edited, providing creation, removal,
+/// Container for all objects and entities in a level being edited, providing creation, removal,
 /// querying, and deep snapshot cloning for undo/redo and serialization.
 /// </summary>
 public sealed class EditorScene
@@ -13,10 +14,17 @@ public sealed class EditorScene
     private readonly List<SceneObject> _objects = new();
     private int _nextObjectId = 1;
 
+    private readonly Dictionary<string, LevelEntity> _entitiesById = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<LevelEntity> _entities = new();
+    private int _nextEntityId = 1;
+
     public string Name { get; set; } = "Untitled";
 
     public IReadOnlyList<SceneObject> Objects => _objects;
     public int ObjectCount => _objects.Count;
+
+    public IReadOnlyList<LevelEntity> Entities => _entities;
+    public int EntityCount => _entities.Count;
 
     public EditorScene()
     {
@@ -96,13 +104,112 @@ public sealed class EditorScene
     }
 
     /// <summary>
+    /// Adds an entity to the scene. Ensures its ID is unique if not already set.
+    /// </summary>
+    public LevelEntity AddEntity(LevelEntity entity)
+    {
+        ArgumentNullException.ThrowIfNull(entity);
+
+        if (string.IsNullOrWhiteSpace(entity.Id) || _entitiesById.ContainsKey(entity.Id))
+        {
+            entity.Id = GenerateUniqueEntityId(string.IsNullOrWhiteSpace(entity.ClassName) ? "entity" : entity.ClassName);
+        }
+
+        _entitiesById[entity.Id] = entity;
+        _entities.Add(entity);
+        return entity;
+    }
+
+    /// <summary>
+    /// Creates and adds a new entity of the specified class name.
+    /// </summary>
+    public LevelEntity CreateEntity(string className, string? id = null, Vector3? position = null, EntitySchemaRegistry? registry = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(className);
+
+        EntitySchemaRegistry reg = registry ?? EntitySchemaRegistry.Default;
+        EntityDefinition def = reg.GetDefinition(className) ?? new EntityDefinition
+        {
+            ClassName = className,
+            DisplayName = className,
+            GizmoShape = EntityGizmoShape.Point
+        };
+
+        string entityId = string.IsNullOrWhiteSpace(id) ? GenerateUniqueEntityId(className) : id;
+        if (_entitiesById.ContainsKey(entityId))
+        {
+            entityId = GenerateUniqueEntityId(className);
+        }
+
+        LevelEntity instance = def.CreateInstance(entityId, position);
+        _entitiesById[instance.Id] = instance;
+        _entities.Add(instance);
+        return instance;
+    }
+
+    /// <summary>
+    /// Deep clones an existing entity, assigns a new unique ID, and adds it to the scene.
+    /// </summary>
+    public LevelEntity AddClonedEntity(LevelEntity original, string? newId = null)
+    {
+        ArgumentNullException.ThrowIfNull(original);
+
+        string cloneId = string.IsNullOrWhiteSpace(newId)
+            ? GenerateUniqueEntityId(original.ClassName)
+            : newId;
+
+        if (_entitiesById.ContainsKey(cloneId))
+        {
+            cloneId = GenerateUniqueEntityId(original.ClassName);
+        }
+
+        LevelEntity clone = original.Clone(cloneId);
+        _entitiesById[clone.Id] = clone;
+        _entities.Add(clone);
+        return clone;
+    }
+
+    public bool RemoveEntity(string entityId)
+    {
+        if (string.IsNullOrWhiteSpace(entityId)) return false;
+
+        if (!_entitiesById.Remove(entityId, out LevelEntity? entity))
+        {
+            return false;
+        }
+
+        _entities.Remove(entity);
+        return true;
+    }
+
+    public LevelEntity? GetEntity(string entityId)
+    {
+        if (string.IsNullOrWhiteSpace(entityId)) return null;
+        return _entitiesById.GetValueOrDefault(entityId);
+    }
+
+    private string GenerateUniqueEntityId(string baseName)
+    {
+        string prefix = string.IsNullOrWhiteSpace(baseName) ? "entity" : baseName.Trim().ToLowerInvariant();
+        while (true)
+        {
+            string candidate = $"{prefix}_{_nextEntityId++}";
+            if (!_entitiesById.ContainsKey(candidate))
+            {
+                return candidate;
+            }
+        }
+    }
+
+    /// <summary>
     /// Creates a complete deep snapshot copy of this EditorScene.
     /// </summary>
     public EditorScene CloneSnapshot()
     {
         var snapshot = new EditorScene(Name)
         {
-            _nextObjectId = _nextObjectId
+            _nextObjectId = _nextObjectId,
+            _nextEntityId = _nextEntityId
         };
 
         for (int i = 0; i < _objects.Count; i++)
@@ -110,6 +217,13 @@ public sealed class EditorScene
             SceneObject clonedObj = _objects[i].Clone();
             snapshot._objects.Add(clonedObj);
             snapshot._objectsById[clonedObj.Id] = clonedObj;
+        }
+
+        for (int i = 0; i < _entities.Count; i++)
+        {
+            LevelEntity clonedEnt = _entities[i].Clone();
+            snapshot._entities.Add(clonedEnt);
+            snapshot._entitiesById[clonedEnt.Id] = clonedEnt;
         }
 
         return snapshot;
@@ -124,6 +238,7 @@ public sealed class EditorScene
 
         Name = snapshot.Name;
         _nextObjectId = snapshot._nextObjectId;
+        _nextEntityId = snapshot._nextEntityId;
 
         _objectsById.Clear();
         _objects.Clear();
@@ -133,6 +248,16 @@ public sealed class EditorScene
             SceneObject clonedObj = snapshot._objects[i].Clone();
             _objects.Add(clonedObj);
             _objectsById[clonedObj.Id] = clonedObj;
+        }
+
+        _entitiesById.Clear();
+        _entities.Clear();
+
+        for (int i = 0; i < snapshot._entities.Count; i++)
+        {
+            LevelEntity clonedEnt = snapshot._entities[i].Clone();
+            _entities.Add(clonedEnt);
+            _entitiesById[clonedEnt.Id] = clonedEnt;
         }
     }
 }

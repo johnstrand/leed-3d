@@ -1,4 +1,5 @@
 using System.Numerics;
+using Leed3D.Kernel.Entities;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Scene;
 using Leed3D.Kernel.Selection;
@@ -20,6 +21,13 @@ public sealed class TransformApplicator
         Quaternion StartRotationQuaternion,
         Vector3 StartScale);
 
+    private readonly record struct EntitySnapshot(
+        string EntityId,
+        Vector3 StartPosition,
+        Vector3 StartRotationEulerDegrees,
+        Quaternion StartRotationQuaternion,
+        Vector3 StartScale);
+
     private readonly record struct VertexSnapshot(
         int VertexId,
         Vector3 StartLocalPosition,
@@ -31,6 +39,7 @@ public sealed class TransformApplicator
         FaceUvMapping StartUvMapping);
 
     private readonly List<ObjectSnapshot> _objectSnapshots = [];
+    private readonly List<EntitySnapshot> _entitySnapshots = [];
     private readonly List<VertexSnapshot> _vertexSnapshots = [];
     private readonly List<FaceUvSnapshot> _faceUvSnapshots = [];
 
@@ -40,7 +49,7 @@ public sealed class TransformApplicator
 
     public bool IsSessionActive { get; private set; }
     public Vector3 PivotWorld { get; private set; }
-    public int AffectedElementCount => _mode == InteractionMode.Object ? _objectSnapshots.Count : _vertexSnapshots.Count;
+    public int AffectedElementCount => _mode == InteractionMode.Object ? _objectSnapshots.Count + _entitySnapshots.Count : _vertexSnapshots.Count;
 
     /// <summary>
     /// Collects the union of all <see cref="MeshVertex.Id"/> values belonging to the currently selected
@@ -115,6 +124,7 @@ public sealed class TransformApplicator
         ArgumentNullException.ThrowIfNull(selection);
 
         _objectSnapshots.Clear();
+        _entitySnapshots.Clear();
         _vertexSnapshots.Clear();
         _faceUvSnapshots.Clear();
 
@@ -146,6 +156,20 @@ public sealed class TransformApplicator
                             _faceUvSnapshots.Add(new FaceUvSnapshot(obj.Id, face.Id, face.UvMapping.Clone()));
                         }
                     }
+                }
+            }
+
+            foreach (string entId in selection.SelectedEntityIds)
+            {
+                LevelEntity? ent = scene.GetEntity(entId);
+                if (ent is not null && !ent.Locked)
+                {
+                    _entitySnapshots.Add(new EntitySnapshot(
+                        ent.Id,
+                        ent.Transform.Position,
+                        ent.Transform.RotationEulerDegrees,
+                        ent.Transform.GetRotationQuaternion(),
+                        ent.Transform.Scale));
                 }
             }
         }
@@ -244,6 +268,16 @@ public sealed class TransformApplicator
                 }
             }
 
+            for (int i = 0; i < _entitySnapshots.Count; i++)
+            {
+                EntitySnapshot snap = _entitySnapshots[i];
+                LevelEntity? ent = scene.GetEntity(snap.EntityId);
+                if (ent is not null)
+                {
+                    ent.Transform.Position = snap.StartPosition + worldDelta;
+                }
+            }
+
             ApplyFaceUvTranslation(scene, worldDelta);
         }
         else if (_activeObjectId.HasValue)
@@ -320,6 +354,22 @@ public sealed class TransformApplicator
                     }
                 }
             }
+
+            for (int i = 0; i < _entitySnapshots.Count; i++)
+            {
+                EntitySnapshot snap = _entitySnapshots[i];
+                LevelEntity? ent = scene.GetEntity(snap.EntityId);
+                if (ent is not null)
+                {
+                    Vector3 offset = snap.StartPosition - PivotWorld;
+                    ent.Transform.Position = PivotWorld + Vector3.Transform(offset, worldRotationDelta);
+                    ent.Transform.RotationEulerDegrees = snap.StartRotationEulerDegrees + eulerDeltaDegrees;
+                    if (ent.ClassName.Equals("player_spawn", StringComparison.OrdinalIgnoreCase) || ent.Properties.TryGet("yaw", out _))
+                    {
+                        ent.Properties.SetFloat("yaw", ent.Transform.RotationEulerDegrees.Y);
+                    }
+                }
+            }
         }
         else if (_activeObjectId.HasValue)
         {
@@ -391,6 +441,21 @@ public sealed class TransformApplicator
                 }
             }
 
+            for (int i = 0; i < _entitySnapshots.Count; i++)
+            {
+                EntitySnapshot snap = _entitySnapshots[i];
+                LevelEntity? ent = scene.GetEntity(snap.EntityId);
+                if (ent is not null)
+                {
+                    Vector3 offset = snap.StartPosition - PivotWorld;
+                    ent.Transform.Position = PivotWorld + (offset * scaleMultiplier);
+                    ent.Transform.Scale = new Vector3(
+                        System.Math.Max(0.01f, snap.StartScale.X * scaleMultiplier.X),
+                        System.Math.Max(0.01f, snap.StartScale.Y * scaleMultiplier.Y),
+                        System.Math.Max(0.01f, snap.StartScale.Z * scaleMultiplier.Z));
+                }
+            }
+
             ApplyFaceUvScale(scene, scaleMultiplier);
         }
         else if (_activeObjectId.HasValue)
@@ -434,6 +499,22 @@ public sealed class TransformApplicator
                     obj.Transform.Position = snap.StartPosition;
                     obj.Transform.RotationEulerDegrees = snap.StartRotationEulerDegrees;
                     obj.Transform.Scale = snap.StartScale;
+                }
+            }
+
+            for (int i = 0; i < _entitySnapshots.Count; i++)
+            {
+                EntitySnapshot snap = _entitySnapshots[i];
+                LevelEntity? ent = scene.GetEntity(snap.EntityId);
+                if (ent is not null)
+                {
+                    ent.Transform.Position = snap.StartPosition;
+                    ent.Transform.RotationEulerDegrees = snap.StartRotationEulerDegrees;
+                    ent.Transform.Scale = snap.StartScale;
+                    if (ent.ClassName.Equals("player_spawn", StringComparison.OrdinalIgnoreCase) || ent.Properties.TryGet("yaw", out _))
+                    {
+                        ent.Properties.SetFloat("yaw", ent.Transform.RotationEulerDegrees.Y);
+                    }
                 }
             }
         }

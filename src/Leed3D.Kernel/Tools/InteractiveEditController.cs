@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Numerics;
 using Leed3D.Kernel.Csg;
+using Leed3D.Kernel.Entities;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Gizmos;
 using Leed3D.Kernel.Math;
@@ -681,11 +682,11 @@ public sealed class InteractiveEditController
     }
 
     /// <summary>
-    /// Deletes selected objects from the scene.
+    /// Deletes selected objects and entities from the scene.
     /// </summary>
     public bool ExecuteDeleteObjects(EditorScene scene, SelectionManager selection, UndoRedoStack undoStack)
     {
-        if (selection.SelectedObjectIds.Count == 0)
+        if (selection.SelectedObjectIds.Count == 0 && selection.SelectedEntityIds.Count == 0)
         {
             return false;
         }
@@ -697,8 +698,14 @@ public sealed class InteractiveEditController
             scene.RemoveObject(id);
         }
 
+        var entIdsToDelete = new List<string>(selection.SelectedEntityIds);
+        foreach (string id in entIdsToDelete)
+        {
+            scene.RemoveEntity(id);
+        }
+
         selection.ClearSelection();
-        undoStack.RecordAction($"Delete {idsToDelete.Count} Object(s)", before, scene);
+        undoStack.RecordAction($"Delete {idsToDelete.Count + entIdsToDelete.Count} Item(s)", before, scene);
         return true;
     }
 
@@ -752,13 +759,41 @@ public sealed class InteractiveEditController
     /// </summary>
     public bool ExecuteQuickClone(EditorScene scene, SelectionManager selection, UndoRedoStack undoStack)
     {
-        if (selection.Mode == InteractionMode.Object && selection.SelectedObjectIds.Count > 0)
+        if (selection.Mode == InteractionMode.Object && (selection.SelectedObjectIds.Count > 0 || selection.SelectedEntityIds.Count > 0))
         {
             EditorScene before = scene.CloneSnapshot();
-            var clones = MeshModifiers.CloneObjects(scene, selection.SelectedObjectIds, selection);
-            if (clones.Count > 0)
+            int totalCloned = 0;
+
+            if (selection.SelectedObjectIds.Count > 0)
             {
-                undoStack.RecordAction($"Clone {clones.Count} Object(s)", before, scene);
+                var clones = MeshModifiers.CloneObjects(scene, selection.SelectedObjectIds, selection);
+                totalCloned += clones.Count;
+            }
+
+            if (selection.SelectedEntityIds.Count > 0)
+            {
+                var entityClones = new List<LevelEntity>();
+                var origEntityIds = selection.SelectedEntityIds.ToList();
+                foreach (string entId in origEntityIds)
+                {
+                    if (scene.GetEntity(entId) is { } ent)
+                    {
+                        LevelEntity clone = scene.AddClonedEntity(ent);
+                        entityClones.Add(clone);
+                    }
+                }
+
+                if (entityClones.Count > 0)
+                {
+                    selection.ClearSelection();
+                    selection.SelectMultipleEntities(entityClones.Select(e => e.Id));
+                    totalCloned += entityClones.Count;
+                }
+            }
+
+            if (totalCloned > 0)
+            {
+                undoStack.RecordAction($"Clone {totalCloned} Item(s)", before, scene);
                 return true;
             }
         }
