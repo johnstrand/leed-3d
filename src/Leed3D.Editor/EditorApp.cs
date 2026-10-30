@@ -2,6 +2,7 @@ using System.Numerics;
 using ImGuiNET;
 using Leed3D.Editor.Texturing;
 using Leed3D.Editor.UI;
+using Leed3D.Editor.UI.Panels;
 using Leed3D.Editor.Viewport;
 using Leed3D.Kernel.Csg;
 using Leed3D.Kernel.Geometry;
@@ -42,6 +43,10 @@ public sealed class EditorApp : IDisposable
     public ModalTransformController ModalController { get; } = new();
     public MaterialLibrary MaterialLibrary { get; } = new();
     public EditorTextureCache TextureCache { get; }
+    public string ActiveMaterialId { get; set; } = "dev_grid_gray";
+
+    public TextureBrowserPanel TextureBrowser { get; } = new();
+    public UvInspectorPanel UvInspector { get; } = new();
 
     public ViewportShadingMode ShadingMode { get; set; } = ViewportShadingMode.SolidWithWireframe;
     public bool SnapToGridEnabled { get; set; } = true;
@@ -187,7 +192,8 @@ public sealed class EditorApp : IDisposable
         DrawViewportWindow(dt);
         DrawSceneSummaryPanel();
         DrawCsgPanel();
-        DrawMaterialBrowserPanel();
+        TextureBrowser.Draw(this);
+        UvInspector.Draw(this);
         DrawStatusBar(mainViewport, statusBarHeight);
     }
 
@@ -1349,6 +1355,33 @@ public sealed class EditorApp : IDisposable
                     FaceHit? pickedFace = MeshPicker.PickFace(activeObj, ray, ignoreBackfaces: true);
                     if (pickedFace.HasValue)
                     {
+                        bool altHeld = Raylib.IsKeyDown(KeyboardKey.LeftAlt) || Raylib.IsKeyDown(KeyboardKey.RightAlt);
+
+                        // TrenchBroom Face Painting: Shift + Alt + Click -> paint ActiveMaterialId
+                        if (shiftHeld && altHeld)
+                        {
+                            if (activeObj.Mesh?.GetFace(pickedFace.Value.FaceId) is { } f)
+                            {
+                                EditorScene before = Scene.CloneSnapshot();
+                                f.MaterialId = ActiveMaterialId;
+                                UndoStack.RecordAction($"Paint Face {f.Id} with {ActiveMaterialId}", before, Scene);
+                                _statusMessage = $"Painted Face {f.Id} with material '{ActiveMaterialId}'.";
+                            }
+                            return;
+                        }
+
+                        // TrenchBroom Material Eyedropper / Sampling: Alt + Click -> sample material and UVs
+                        if (altHeld)
+                        {
+                            if (activeObj.Mesh?.GetFace(pickedFace.Value.FaceId) is { } f)
+                            {
+                                ActiveMaterialId = f.MaterialId;
+                                Selection.SelectSingleFace(f.Id);
+                                _statusMessage = $"Sampled material '{ActiveMaterialId}' and UV mapping from Face {f.Id}.";
+                            }
+                            return;
+                        }
+
                         if (shiftHeld)
                         {
                             Selection.ToggleSelectFace(pickedFace.Value.FaceId);
@@ -1487,43 +1520,7 @@ public sealed class EditorApp : IDisposable
         DrawAxisIndicator(Vector3.UnitZ, ImGui.GetColorU32(new Vector4(0.32f, 0.58f, 0.98f, 1.0f)), "+Z");
     }
 
-    private void DrawMaterialBrowserPanel()
-    {
-        ImGui.Begin("Materials");
-
-        ImGui.TextDisabled($"Registered ({MaterialLibrary.Materials.Count}):");
-        ImGui.Separator();
-
-        foreach (MaterialEntry mat in MaterialLibrary.Materials)
-        {
-            string tag = mat.Source == MaterialSource.Procedural ? "[Proc]" : "[File]";
-            bool isStarter = mat.Id == "dev_grid_gray";
-
-            if (ImGui.Selectable($"{tag} {mat.DisplayName} ({mat.Id})", isStarter))
-            {
-                ApplyMaterialToSelection(mat.Id);
-            }
-        }
-
-        ImGui.Separator();
-        if (ImGui.Button("Scan Textures Folder..."))
-        {
-            string dir = Path.Combine(Directory.GetCurrentDirectory(), "textures");
-            if (Directory.Exists(dir))
-            {
-                int count = MaterialLibrary.ScanDirectory(dir);
-                StatusMessage = $"Scanned textures: registered {count} file materials.";
-            }
-            else
-            {
-                StatusMessage = $"Directory not found: {dir}";
-            }
-        }
-
-        ImGui.End();
-    }
-
-    private void ApplyMaterialToSelection(string materialId)
+    public void ApplyMaterialToSelection(string materialId)
     {
         if (Selection.Mode == InteractionMode.Object && Selection.SelectedObjectIds.Count > 0)
         {
