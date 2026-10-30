@@ -42,6 +42,15 @@ public sealed class EditorShortcutHandler
     /// </summary>
     public void HandleShortcuts(bool isViewportHovered, bool isViewportFocused, Vector2 viewportLocalMousePos, Vector2 viewportSize)
     {
+        if (_app.IsWalkModeActive)
+        {
+            if (Raylib.IsKeyPressed(KeyboardKey.F5) || Raylib.IsKeyPressed(KeyboardKey.Escape))
+            {
+                _app.ExitWalkMode();
+            }
+            return;
+        }
+
         ImGuiIOPtr io = ImGui.GetIO();
         if (io.WantTextInput)
         {
@@ -196,6 +205,13 @@ public sealed class EditorShortcutHandler
         if (Raylib.IsKeyPressed(KeyboardKey.F4))
         {
             _app.ToggleLitPreview();
+            return;
+        }
+
+        // F5: Enter First-Person Walk Playtest mode
+        if (Raylib.IsKeyPressed(KeyboardKey.F5))
+        {
+            _app.ToggleWalkMode();
             return;
         }
 

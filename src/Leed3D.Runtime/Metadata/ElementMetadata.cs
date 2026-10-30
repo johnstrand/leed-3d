@@ -310,4 +310,12 @@ public sealed class ElementMetadata
 
         return false;
     }
+
+    /// <summary>
+    /// Returns the surface type metadata (`surface` property), or <paramref name="defaultSurface"/> if not set.
+    /// </summary>
+    public string GetSurfaceType(string defaultSurface = "default")
+    {
+        return GetString("surface", defaultSurface) ?? defaultSurface;
+    }
 }

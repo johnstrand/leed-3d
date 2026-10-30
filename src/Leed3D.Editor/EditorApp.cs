@@ -10,6 +10,7 @@ using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Gizmos;
 using Leed3D.Kernel.Math;
 using Leed3D.Kernel.Modifiers;
+using Leed3D.Kernel.Physics;
 using Leed3D.Kernel.Primitives;
 using Leed3D.Kernel.Scene;
 using Leed3D.Kernel.Selection;
@@ -52,6 +53,18 @@ public sealed class EditorApp : IDisposable
     public MetadataInspectorPanel MetadataInspector { get; } = new();
     public EntitySchemaRegistry EntityRegistry { get; } = new();
     public EnvironmentLightingSettings EnvironmentSettings { get; } = new();
+    public WalkPlayerConfig WalkConfig { get; } = new();
+    public WalkController? ActiveWalkController { get; private set; }
+    public bool IsWalkModeActive => ActiveWalkController is not null;
+
+    private Vector3 _savedWalkCamPosition;
+    private Vector3 _savedWalkCamTarget;
+    private float _savedWalkCamYaw;
+    private float _savedWalkCamPitch;
+    private float _savedWalkCamOrbitDist;
+    private ViewportProjectionMode _savedWalkCamProjection;
+    private bool _savedWalkCamInvertOrtho;
+    private ViewportShadingMode _savedWalkShadingMode;
 
     public ViewportShadingMode ShadingMode { get; set; } = ViewportShadingMode.SolidWithWireframe;
     private ViewportShadingMode _previousShadingMode = ViewportShadingMode.SolidWithWireframe;
@@ -71,6 +84,154 @@ public sealed class EditorApp : IDisposable
             ShadingMode = ViewportShadingMode.LitPreview;
             StatusMessage = "Lit Preview enabled.";
         }
+    }
+
+    public void ToggleWalkMode()
+    {
+        if (IsWalkModeActive)
+        {
+            ExitWalkMode();
+        }
+        else
+        {
+            EnterWalkMode();
+        }
+    }
+
+    public void EnterWalkMode()
+    {
+        if (IsWalkModeActive)
+        {
+            return;
+        }
+
+        if (EditController.IsActive)
+        {
+            if (EditController.IsExtrudeActive)
+            {
+                EditController.CancelExtrude(Scene, UndoStack);
+            }
+            else if (EditController.IsInsetActive)
+            {
+                EditController.CancelInset(Scene, UndoStack);
+            }
+        }
+        if (ModalController.IsActive)
+        {
+            ModalController.Cancel(Scene, UndoStack);
+        }
+        PrimitiveController.Dismiss();
+
+        _savedWalkCamPosition = Camera.Position;
+        _savedWalkCamTarget = Camera.Target;
+        _savedWalkCamYaw = Camera.YawDegrees;
+        _savedWalkCamPitch = Camera.PitchDegrees;
+        _savedWalkCamOrbitDist = Camera.OrbitDistance;
+        _savedWalkCamProjection = Camera.ProjectionMode;
+        _savedWalkCamInvertOrtho = Camera.InvertOrthoAxis;
+        _savedWalkShadingMode = ShadingMode;
+
+        LevelEntity? spawnEnt = Scene.Entities.FirstOrDefault(e =>
+            e.Visible && e.ClassName.Equals("player_spawn", StringComparison.OrdinalIgnoreCase));
+
+        Vector3 spawnPos;
+        float spawnYaw;
+        float spawnPitch;
+
+        if (spawnEnt is not null)
+        {
+            spawnPos = spawnEnt.Transform.Position;
+            spawnYaw = spawnEnt.Properties.GetFloat("yaw") ?? spawnEnt.Transform.RotationEulerDegrees.Y;
+            spawnPitch = 0.0f;
+        }
+        else
+        {
+            spawnPos = Camera.Position - new Vector3(0.0f, WalkConfig.EyeHeight, 0.0f);
+            spawnYaw = Camera.YawDegrees;
+            spawnPitch = Camera.PitchDegrees;
+        }
+
+        CollisionMeshWorld collisionWorld = CollisionMeshWorld.Build(Scene, EntityRegistry);
+        ActiveWalkController = new WalkController(collisionWorld, WalkConfig);
+        ActiveWalkController.Spawn(spawnPos, spawnYaw, spawnPitch);
+
+        ShadingMode = ViewportShadingMode.LitPreview;
+        Camera.SetProjectionMode(ViewportProjectionMode.Perspective);
+        SyncCameraToWalkController();
+
+        if (Raylib.IsWindowReady())
+        {
+            Raylib.DisableCursor();
+        }
+
+        StatusMessage = "Walk Playtest Mode active (WASD Move, Shift Sprint, Space Jump, F5/Esc Exit).";
+    }
+
+    public void ExitWalkMode()
+    {
+        if (!IsWalkModeActive)
+        {
+            return;
+        }
+
+        ActiveWalkController = null;
+
+        if (Raylib.IsWindowReady())
+        {
+            Raylib.EnableCursor();
+        }
+
+        ShadingMode = _savedWalkShadingMode;
+        Camera.YawDegrees = _savedWalkCamYaw;
+        Camera.PitchDegrees = _savedWalkCamPitch;
+        Camera.OrbitDistance = _savedWalkCamOrbitDist;
+        Camera.Target = _savedWalkCamTarget;
+        Camera.SetProjectionMode(_savedWalkCamProjection, _savedWalkCamInvertOrtho);
+        Camera.Position = _savedWalkCamPosition;
+        Camera.Target = _savedWalkCamTarget;
+
+        StatusMessage = "Exited Walk Playtest Mode — Restored editor camera.";
+    }
+
+    private void UpdateWalkMode(float dt)
+    {
+        if (ActiveWalkController is null)
+        {
+            return;
+        }
+
+        Vector2 mouseDelta = Raylib.GetMouseDelta();
+        float newYaw = ActiveWalkController.YawDegrees + (mouseDelta.X * Camera.MouseLookSensitivity);
+        float newPitch = System.Math.Clamp(
+            ActiveWalkController.PitchDegrees - (mouseDelta.Y * Camera.MouseLookSensitivity),
+            -89.0f,
+            89.0f);
+
+        float moveX = 0.0f;
+        float moveY = 0.0f;
+        if (Raylib.IsKeyDown(KeyboardKey.D) || Raylib.IsKeyDown(KeyboardKey.Right)) moveX += 1.0f;
+        if (Raylib.IsKeyDown(KeyboardKey.A) || Raylib.IsKeyDown(KeyboardKey.Left)) moveX -= 1.0f;
+        if (Raylib.IsKeyDown(KeyboardKey.W) || Raylib.IsKeyDown(KeyboardKey.Up)) moveY += 1.0f;
+        if (Raylib.IsKeyDown(KeyboardKey.S) || Raylib.IsKeyDown(KeyboardKey.Down)) moveY -= 1.0f;
+
+        bool sprintHeld = Raylib.IsKeyDown(KeyboardKey.LeftShift) || Raylib.IsKeyDown(KeyboardKey.RightShift);
+        bool jumpPressed = Raylib.IsKeyPressed(KeyboardKey.Space) || Raylib.IsKeyDown(KeyboardKey.Space);
+
+        ActiveWalkController.Step(dt, new Vector2(moveX, moveY), newYaw, newPitch, jumpPressed, sprintHeld);
+        SyncCameraToWalkController();
+    }
+
+    private void SyncCameraToWalkController()
+    {
+        if (ActiveWalkController is null)
+        {
+            return;
+        }
+
+        Camera.YawDegrees = ActiveWalkController.YawDegrees;
+        Camera.PitchDegrees = ActiveWalkController.PitchDegrees;
+        Camera.Position = ActiveWalkController.EyePosition;
+        Camera.Target = Camera.Position + Camera.GetForward();
     }
 
     public bool SnapToGridEnabled { get; set; } = true;
@@ -159,6 +320,10 @@ public sealed class EditorApp : IDisposable
         {
             float dt = Raylib.GetFrameTime();
             HandleGlobalShortcuts();
+            if (IsWalkModeActive)
+            {
+                UpdateWalkMode(dt);
+            }
 
             // Render 3D scene into offscreen RenderTexture2D before drawing ImGui
             _viewportRenderer.RenderScene(
@@ -367,6 +532,10 @@ public sealed class EditorApp : IDisposable
             if (ImGui.MenuItem("Lit Preview", "F4", ShadingMode == ViewportShadingMode.LitPreview))
             {
                 ToggleLitPreview();
+            }
+            if (ImGui.MenuItem("Walk Playtest Mode", "F5", IsWalkModeActive))
+            {
+                ToggleWalkMode();
             }
             if (ImGui.MenuItem("Environment & Fog Settings..."))
             {
@@ -639,14 +808,65 @@ public sealed class EditorApp : IDisposable
         DrawRadialArrayPopup();
         DrawEnvironmentLightingPopup();
 
-        if (_isViewportHovered || Raylib.IsMouseButtonDown(MouseButton.Right) || Raylib.IsMouseButtonDown(MouseButton.Middle))
+        if (IsWalkModeActive)
         {
-            UpdateViewportCameraInput(dt, new Vector2(targetW, targetH));
+            DrawWalkModeHudOverlay(new Vector2(targetW, targetH));
+        }
+        else
+        {
+            if (_isViewportHovered || Raylib.IsMouseButtonDown(MouseButton.Right) || Raylib.IsMouseButtonDown(MouseButton.Middle))
+            {
+                UpdateViewportCameraInput(dt, new Vector2(targetW, targetH));
+            }
+
+            UpdateViewportSelectionInput(new Vector2(targetW, targetH));
         }
 
-        UpdateViewportSelectionInput(new Vector2(targetW, targetH));
-
         ImGui.End();
+    }
+
+    private void DrawWalkModeHudOverlay(Vector2 viewportSize)
+    {
+        if (ActiveWalkController is null)
+        {
+            return;
+        }
+
+        Vector3 p = ActiveWalkController.Position;
+        string groundedStr = ActiveWalkController.IsGrounded ? "Yes" : "No";
+        string surfaceStr = !string.IsNullOrWhiteSpace(ActiveWalkController.GroundSurfaceName)
+            ? ActiveWalkController.GroundSurfaceName!
+            : (!string.IsNullOrWhiteSpace(ActiveWalkController.GroundMaterialId) ? ActiveWalkController.GroundMaterialId! : "none");
+        string triggerStr = ActiveWalkController.ActiveTriggerIds.Count > 0
+            ? string.Join(", ", ActiveWalkController.ActiveTriggerIds)
+            : "none";
+
+        string hudText = $"WALK MODE (F5 / Esc to Exit) | Pos: ({p.X:0.00}, {p.Y:0.00}, {p.Z:0.00}) | Grounded: {groundedStr} | Surface: {surfaceStr} | Trigger: {triggerStr}";
+
+        ImDrawListPtr drawList = ImGui.GetWindowDrawList();
+        Vector2 textSize = ImGui.CalcTextSize(hudText);
+        Vector2 pad = new(12.0f, 6.0f);
+        float bannerWidth = textSize.X + (pad.X * 2.0f);
+        float bannerHeight = textSize.Y + (pad.Y * 2.0f);
+
+        Vector2 bannerMin = new(
+            _viewportScreenMin.X + ((viewportSize.X - bannerWidth) * 0.5f),
+            _viewportScreenMin.Y + 12.0f);
+        Vector2 bannerMax = bannerMin + new Vector2(bannerWidth, bannerHeight);
+
+        uint bgCol = ImGui.ColorConvertFloat4ToU32(new Vector4(0.08f, 0.10f, 0.13f, 0.85f));
+        uint borderCol = ImGui.ColorConvertFloat4ToU32(new Vector4(0.95f, 0.50f, 0.18f, 0.90f));
+        uint textCol = ImGui.ColorConvertFloat4ToU32(new Vector4(0.96f, 0.97f, 0.99f, 1.0f));
+
+        drawList.AddRectFilled(bannerMin, bannerMax, bgCol, 5.0f);
+        drawList.AddRect(bannerMin, bannerMax, borderCol, 5.0f, ImDrawFlags.None, 1.5f);
+        drawList.AddText(bannerMin + pad, textCol, hudText);
+
+        // Subtle center crosshair
+        Vector2 center = _viewportScreenMin + (viewportSize * 0.5f);
+        uint crossCol = ImGui.ColorConvertFloat4ToU32(new Vector4(1.0f, 1.0f, 1.0f, 0.65f));
+        drawList.AddLine(center - new Vector2(6.0f, 0.0f), center + new Vector2(6.0f, 0.0f), crossCol, 1.5f);
+        drawList.AddLine(center - new Vector2(0.0f, 6.0f), center + new Vector2(0.0f, 6.0f), crossCol, 1.5f);
     }
 
     private void DrawViewportHeaderToolbar()
@@ -742,6 +962,21 @@ public sealed class EditorApp : IDisposable
         if (ImGui.Button("Lighting...##envSettings"))
         {
             ImGui.OpenPopup("EnvironmentLightingPopup");
+        }
+
+        ImGui.SameLine();
+        bool walkActive = IsWalkModeActive;
+        if (walkActive)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.85f, 0.42f, 0.15f, 1.0f));
+        }
+        if (ImGui.Button(walkActive ? "Exit Walk [F5]##walkBtn" : "Walk Mode [F5]##walkBtn"))
+        {
+            ToggleWalkMode();
+        }
+        if (walkActive)
+        {
+            ImGui.PopStyleColor();
         }
 
         // 2. Grid Snap Selector
