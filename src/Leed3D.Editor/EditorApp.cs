@@ -1,5 +1,6 @@
 using System.Numerics;
 using ImGuiNET;
+using Leed3D.Editor.Texturing;
 using Leed3D.Editor.UI;
 using Leed3D.Editor.Viewport;
 using Leed3D.Kernel.Csg;
@@ -10,6 +11,7 @@ using Leed3D.Kernel.Modifiers;
 using Leed3D.Kernel.Primitives;
 using Leed3D.Kernel.Scene;
 using Leed3D.Kernel.Selection;
+using Leed3D.Kernel.Texturing;
 using Leed3D.Kernel.Tools;
 using Leed3D.Kernel.Viewport;
 using Raylib_cs;
@@ -38,6 +40,8 @@ public sealed class EditorApp : IDisposable
     public TransformGizmo3D Gizmo { get; } = new();
     public TransformApplicator Applicator { get; } = new();
     public ModalTransformController ModalController { get; } = new();
+    public MaterialLibrary MaterialLibrary { get; } = new();
+    public EditorTextureCache TextureCache { get; }
 
     public ViewportShadingMode ShadingMode { get; set; } = ViewportShadingMode.SolidWithWireframe;
     public bool SnapToGridEnabled { get; set; } = true;
@@ -85,6 +89,7 @@ public sealed class EditorApp : IDisposable
 
     public EditorApp()
     {
+        TextureCache = new EditorTextureCache(MaterialLibrary);
         PrimitiveController = new PrimitiveCreationController(Scene, UndoStack);
         ShortcutHandler = new EditorShortcutHandler(this);
         InitializeDefaultStarterScene();
@@ -126,7 +131,8 @@ public sealed class EditorApp : IDisposable
                 ModalController,
                 CsgPreviewTargetId,
                 CsgPreviewCutterId,
-                CsgCutterWireColor);
+                CsgCutterWireColor,
+                TextureCache);
 
             Raylib.BeginDrawing();
             Raylib.ClearBackground(new Color(20, 22, 25, 255));
@@ -181,6 +187,7 @@ public sealed class EditorApp : IDisposable
         DrawViewportWindow(dt);
         DrawSceneSummaryPanel();
         DrawCsgPanel();
+        DrawMaterialBrowserPanel();
         DrawStatusBar(mainViewport, statusBarHeight);
     }
 
@@ -1480,6 +1487,78 @@ public sealed class EditorApp : IDisposable
         DrawAxisIndicator(Vector3.UnitZ, ImGui.GetColorU32(new Vector4(0.32f, 0.58f, 0.98f, 1.0f)), "+Z");
     }
 
+    private void DrawMaterialBrowserPanel()
+    {
+        ImGui.Begin("Materials");
+
+        ImGui.TextDisabled($"Registered ({MaterialLibrary.Materials.Count}):");
+        ImGui.Separator();
+
+        foreach (MaterialEntry mat in MaterialLibrary.Materials)
+        {
+            string tag = mat.Source == MaterialSource.Procedural ? "[Proc]" : "[File]";
+            bool isStarter = mat.Id == "dev_grid_gray";
+
+            if (ImGui.Selectable($"{tag} {mat.DisplayName} ({mat.Id})", isStarter))
+            {
+                ApplyMaterialToSelection(mat.Id);
+            }
+        }
+
+        ImGui.Separator();
+        if (ImGui.Button("Scan Textures Folder..."))
+        {
+            string dir = Path.Combine(Directory.GetCurrentDirectory(), "textures");
+            if (Directory.Exists(dir))
+            {
+                int count = MaterialLibrary.ScanDirectory(dir);
+                StatusMessage = $"Scanned textures: registered {count} file materials.";
+            }
+            else
+            {
+                StatusMessage = $"Directory not found: {dir}";
+            }
+        }
+
+        ImGui.End();
+    }
+
+    private void ApplyMaterialToSelection(string materialId)
+    {
+        if (Selection.Mode == InteractionMode.Object && Selection.SelectedObjectIds.Count > 0)
+        {
+            EditorScene before = Scene.CloneSnapshot();
+            foreach (int objId in Selection.SelectedObjectIds)
+            {
+                if (Scene.GetObject(objId) is { Mesh: { } mesh })
+                {
+                    for (int f = 0; f < mesh.Faces.Count; f++)
+                    {
+                        mesh.Faces[f].MaterialId = materialId;
+                    }
+                }
+            }
+            UndoStack.RecordAction($"Assign Material {materialId}", before, Scene);
+            StatusMessage = $"Assigned {materialId} to {Selection.SelectedObjectIds.Count} object(s).";
+        }
+        else if (Selection.Mode == InteractionMode.Face && Selection.ActiveObjectId.HasValue && Selection.SelectedFaceIds.Count > 0)
+        {
+            if (Scene.GetObject(Selection.ActiveObjectId.Value) is { Mesh: { } mesh })
+            {
+                EditorScene before = Scene.CloneSnapshot();
+                foreach (int fId in Selection.SelectedFaceIds)
+                {
+                    if (mesh.GetFace(fId) is { } face)
+                    {
+                        face.MaterialId = materialId;
+                    }
+                }
+                UndoStack.RecordAction($"Assign Material {materialId} to Faces", before, Scene);
+                StatusMessage = $"Assigned {materialId} to {Selection.SelectedFaceIds.Count} face(s).";
+            }
+        }
+    }
+
     private void DrawSceneSummaryPanel()
     {
         ImGui.Begin("Scene Outliner");
@@ -2211,6 +2290,7 @@ public sealed class EditorApp : IDisposable
 
     public void Dispose()
     {
+        TextureCache.Dispose();
         _viewportRenderer.Dispose();
         RlImGui.Shutdown();
         if (Raylib.IsWindowReady())

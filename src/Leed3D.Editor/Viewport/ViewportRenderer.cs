@@ -1,9 +1,11 @@
 using System.Numerics;
+using Leed3D.Editor.Texturing;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Gizmos;
 using Leed3D.Kernel.Math;
 using Leed3D.Kernel.Scene;
 using Leed3D.Kernel.Selection;
+using Leed3D.Kernel.Texturing;
 using Leed3D.Kernel.Viewport;
 using Raylib_cs;
 
@@ -68,7 +70,8 @@ public sealed class ViewportRenderer : IDisposable
         ModalTransformController? modalController = null,
         int? csgPreviewTargetId = null,
         int? csgPreviewCutterId = null,
-        Color? csgCutterWireColor = null)
+        Color? csgCutterWireColor = null,
+        EditorTextureCache? textureCache = null)
     {
         if (_renderTarget.Id == 0)
         {
@@ -112,7 +115,7 @@ public sealed class ViewportRenderer : IDisposable
                 customEdgeColor = new Color(70, 160, 255, 255); // Highlight Target in blue/cyan
             }
 
-            DrawMeshObject(obj, shadingMode, selection, customEdgeColor);
+            DrawMeshObject(obj, shadingMode, selection, customEdgeColor, textureCache);
         }
 
         // 1. Render active modal operator infinite guide lines
@@ -256,7 +259,12 @@ public sealed class ViewportRenderer : IDisposable
         Rlgl.End();
     }
 
-    private static void DrawMeshObject(SceneObject obj, ViewportShadingMode shadingMode, SelectionManager? selection, Color? customEdgeColor = null)
+    private static void DrawMeshObject(
+        SceneObject obj,
+        ViewportShadingMode shadingMode,
+        SelectionManager? selection,
+        Color? customEdgeColor = null,
+        EditorTextureCache? textureCache = null)
     {
         EditableMesh mesh = obj.Mesh!;
         Matrix4x4 worldMatrix = obj.Transform.GetLocalMatrix();
@@ -276,48 +284,105 @@ public sealed class ViewportRenderer : IDisposable
 
         if (drawSolid)
         {
-            Rlgl.Begin(DrawMode.Triangles);
-
+            // Group faces by material to batch textured draw calls
+            var facesByMaterial = new Dictionary<string, List<PolygonFace>>(StringComparer.OrdinalIgnoreCase);
             for (int fIdx = 0; fIdx < mesh.Faces.Count; fIdx++)
             {
                 PolygonFace face = mesh.Faces[fIdx];
-                Vector3 localNormal = face.ComputeNormal(mesh);
-                Vector3 worldNormal = Vector3.Normalize(obj.Transform.TransformDirectionToWorld(localNormal));
-
-                Color shadedColor = ComputeDirectionalFaceShade(worldNormal, face.MaterialId);
-
-                IReadOnlyList<(int V0, int V1, int V2)> tris = PolygonTriangulator.TriangulateFace(face, mesh);
-                for (int tIdx = 0; tIdx < tris.Count; tIdx++)
+                string matId = string.IsNullOrWhiteSpace(face.MaterialId) ? PolygonFace.DefaultMaterialId : face.MaterialId;
+                if (!facesByMaterial.TryGetValue(matId, out List<PolygonFace>? list))
                 {
-                    if (Rlgl.CheckRenderBatchLimit(3))
-                    {
-                        Rlgl.Begin(DrawMode.Triangles);
-                    }
-
-                    var (v0Id, v1Id, v2Id) = tris[tIdx];
-                    // Flip triangle index winding when negating Z via CoordSpace
-                    var (w0Id, w1Id, w2Id) = CoordSpace.FlipTriangleWinding(v0Id, v1Id, v2Id);
-
-                    MeshVertex? mv0 = mesh.GetVertex(w0Id);
-                    MeshVertex? mv1 = mesh.GetVertex(w1Id);
-                    MeshVertex? mv2 = mesh.GetVertex(w2Id);
-                    if (mv0 is null || mv1 is null || mv2 is null)
-                    {
-                        continue;
-                    }
-
-                    Vector3 p0Rh = CoordSpace.ToRightHanded(Vector3.Transform(mv0.Position, worldMatrix));
-                    Vector3 p1Rh = CoordSpace.ToRightHanded(Vector3.Transform(mv1.Position, worldMatrix));
-                    Vector3 p2Rh = CoordSpace.ToRightHanded(Vector3.Transform(mv2.Position, worldMatrix));
-
-                    Rlgl.Color4ub(shadedColor.R, shadedColor.G, shadedColor.B, shadedColor.A);
-                    Rlgl.Vertex3f(p0Rh.X, p0Rh.Y, p0Rh.Z);
-                    Rlgl.Vertex3f(p1Rh.X, p1Rh.Y, p1Rh.Z);
-                    Rlgl.Vertex3f(p2Rh.X, p2Rh.Y, p2Rh.Z);
+                    list = [];
+                    facesByMaterial[matId] = list;
                 }
+                list.Add(face);
             }
 
-            Rlgl.End();
+            foreach (var (matId, faces) in facesByMaterial)
+            {
+                Texture2D texture = default;
+                bool hasTexture = textureCache != null && Raylib.IsWindowReady();
+                if (hasTexture)
+                {
+                    texture = textureCache!.GetTexture(matId);
+                    if (texture.Id != 0)
+                    {
+                        Rlgl.SetTexture(texture.Id);
+                    }
+                    else
+                    {
+                        hasTexture = false;
+                    }
+                }
+
+                Rlgl.Begin(DrawMode.Triangles);
+
+                for (int f = 0; f < faces.Count; f++)
+                {
+                    PolygonFace face = faces[f];
+                    Vector3 localNormal = face.ComputeNormal(mesh);
+                    Vector3 worldNormal = Vector3.Normalize(obj.Transform.TransformDirectionToWorld(localNormal));
+
+                    Color shadedColor = ComputeDirectionalFaceShade(worldNormal, face.MaterialId, hasTexture);
+
+                    IReadOnlyList<Vector2> faceUvs = UvProjectionEngine.ComputeFaceUvs(face, mesh, obj.Transform);
+                    IReadOnlyList<(int V0, int V1, int V2)> tris = PolygonTriangulator.TriangulateFace(face, mesh);
+
+                    for (int tIdx = 0; tIdx < tris.Count; tIdx++)
+                    {
+                        if (Rlgl.CheckRenderBatchLimit(3))
+                        {
+                            Rlgl.Begin(DrawMode.Triangles);
+                        }
+
+                        var (v0Id, v1Id, v2Id) = tris[tIdx];
+                        // Find local vertex loop indices for UVs
+                        int idx0 = face.VertexIds.IndexOf(v0Id);
+                        int idx1 = face.VertexIds.IndexOf(v1Id);
+                        int idx2 = face.VertexIds.IndexOf(v2Id);
+
+                        Vector2 uv0 = idx0 >= 0 && idx0 < faceUvs.Count ? faceUvs[idx0] : Vector2.Zero;
+                        Vector2 uv1 = idx1 >= 0 && idx1 < faceUvs.Count ? faceUvs[idx1] : Vector2.Zero;
+                        Vector2 uv2 = idx2 >= 0 && idx2 < faceUvs.Count ? faceUvs[idx2] : Vector2.Zero;
+
+                        // Flip triangle index winding when negating Z via CoordSpace
+                        var (w0Id, w1Id, w2Id) = CoordSpace.FlipTriangleWinding(v0Id, v1Id, v2Id);
+                        Vector2 wUv0 = (w0Id == v0Id) ? uv0 : ((w0Id == v1Id) ? uv1 : uv2);
+                        Vector2 wUv1 = (w1Id == v0Id) ? uv0 : ((w1Id == v1Id) ? uv1 : uv2);
+                        Vector2 wUv2 = (w2Id == v0Id) ? uv0 : ((w2Id == v1Id) ? uv1 : uv2);
+
+                        MeshVertex? mv0 = mesh.GetVertex(w0Id);
+                        MeshVertex? mv1 = mesh.GetVertex(w1Id);
+                        MeshVertex? mv2 = mesh.GetVertex(w2Id);
+                        if (mv0 is null || mv1 is null || mv2 is null)
+                        {
+                            continue;
+                        }
+
+                        Vector3 p0Rh = CoordSpace.ToRightHanded(Vector3.Transform(mv0.Position, worldMatrix));
+                        Vector3 p1Rh = CoordSpace.ToRightHanded(Vector3.Transform(mv1.Position, worldMatrix));
+                        Vector3 p2Rh = CoordSpace.ToRightHanded(Vector3.Transform(mv2.Position, worldMatrix));
+
+                        Rlgl.Color4ub(shadedColor.R, shadedColor.G, shadedColor.B, shadedColor.A);
+
+                        Rlgl.TexCoord2f(wUv0.X, wUv0.Y);
+                        Rlgl.Vertex3f(p0Rh.X, p0Rh.Y, p0Rh.Z);
+
+                        Rlgl.TexCoord2f(wUv1.X, wUv1.Y);
+                        Rlgl.Vertex3f(p1Rh.X, p1Rh.Y, p1Rh.Z);
+
+                        Rlgl.TexCoord2f(wUv2.X, wUv2.Y);
+                        Rlgl.Vertex3f(p2Rh.X, p2Rh.Y, p2Rh.Z);
+                    }
+                }
+
+                Rlgl.End();
+
+                if (hasTexture)
+                {
+                    Rlgl.SetTexture(0);
+                }
+            }
         }
 
         // Selected faces overlay in Face Mode (semi-transparent orange fill)
@@ -429,8 +494,18 @@ public sealed class ViewportRenderer : IDisposable
         }
     }
 
-    private static Color ComputeDirectionalFaceShade(Vector3 worldNormal, string materialId)
+    private static Color ComputeDirectionalFaceShade(Vector3 worldNormal, string materialId, bool hasTexture = false)
     {
+        if (hasTexture)
+        {
+            // Subtle directional lighting tint when texture is active
+            float nDotL1 = System.Math.Max(0.0f, Vector3.Dot(worldNormal, LightDir1));
+            float nDotL2 = System.Math.Max(0.0f, Vector3.Dot(worldNormal, LightDir2));
+            float light = 0.55f + (nDotL1 * 0.35f) + (nDotL2 * 0.10f);
+            byte litVal = (byte)System.Math.Clamp((int)(light * 255.0f), 0, 255);
+            return new Color((int)litVal, (int)litVal, (int)litVal, 255);
+        }
+
         // Base color derived from materialId
         Vector3 baseColor = materialId switch
         {
