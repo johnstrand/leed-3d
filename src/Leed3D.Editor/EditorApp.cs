@@ -51,8 +51,28 @@ public sealed class EditorApp : IDisposable
     public UvInspectorPanel UvInspector { get; } = new();
     public MetadataInspectorPanel MetadataInspector { get; } = new();
     public EntitySchemaRegistry EntityRegistry { get; } = new();
+    public EnvironmentLightingSettings EnvironmentSettings { get; } = new();
 
     public ViewportShadingMode ShadingMode { get; set; } = ViewportShadingMode.SolidWithWireframe;
+    private ViewportShadingMode _previousShadingMode = ViewportShadingMode.SolidWithWireframe;
+
+    public void ToggleLitPreview()
+    {
+        if (ShadingMode == ViewportShadingMode.LitPreview)
+        {
+            ShadingMode = _previousShadingMode == ViewportShadingMode.LitPreview
+                ? ViewportShadingMode.SolidWithWireframe
+                : _previousShadingMode;
+            StatusMessage = $"Lit Preview disabled ({ShadingMode}).";
+        }
+        else
+        {
+            _previousShadingMode = ShadingMode;
+            ShadingMode = ViewportShadingMode.LitPreview;
+            StatusMessage = "Lit Preview enabled.";
+        }
+    }
+
     public bool SnapToGridEnabled { get; set; } = true;
     public float CurrentGridStep { get; set; } = 1.0f;
     public bool SnapAngleEnabled { get; set; } = true;
@@ -153,7 +173,8 @@ public sealed class EditorApp : IDisposable
                 CsgPreviewCutterId,
                 CsgCutterWireColor,
                 TextureCache,
-                EntityRegistry);
+                EntityRegistry,
+                EnvironmentSettings);
 
             Raylib.BeginDrawing();
             Raylib.ClearBackground(new Color(20, 22, 25, 255));
@@ -340,6 +361,16 @@ public sealed class EditorApp : IDisposable
             if (ImGui.MenuItem("Frame Origin", "Home / F"))
             {
                 Camera.FrameTarget(Vector3.Zero, 5.0f);
+            }
+
+            ImGui.Separator();
+            if (ImGui.MenuItem("Lit Preview", "F4", ShadingMode == ViewportShadingMode.LitPreview))
+            {
+                ToggleLitPreview();
+            }
+            if (ImGui.MenuItem("Environment & Fog Settings..."))
+            {
+                ImGui.OpenPopup("EnvironmentLightingPopup");
             }
 
             ImGui.EndMenu();
@@ -606,6 +637,7 @@ public sealed class EditorApp : IDisposable
         DrawMirrorPopup();
         DrawLinearArrayPopup();
         DrawRadialArrayPopup();
+        DrawEnvironmentLightingPopup();
 
         if (_isViewportHovered || Raylib.IsMouseButtonDown(MouseButton.Right) || Raylib.IsMouseButtonDown(MouseButton.Middle))
         {
@@ -686,7 +718,30 @@ public sealed class EditorApp : IDisposable
                 ShadingMode = ViewportShadingMode.Solid;
             if (ImGui.Selectable("Wireframe", ShadingMode == ViewportShadingMode.Wireframe))
                 ShadingMode = ViewportShadingMode.Wireframe;
+            if (ImGui.Selectable("Lit Preview", ShadingMode == ViewportShadingMode.LitPreview))
+                ShadingMode = ViewportShadingMode.LitPreview;
             ImGui.EndCombo();
+        }
+
+        ImGui.SameLine();
+        bool isLit = ShadingMode == ViewportShadingMode.LitPreview;
+        if (isLit)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Button, new Vector4(0.20f, 0.55f, 0.35f, 1.0f));
+        }
+        if (ImGui.Button(isLit ? "Lit Preview [F4]##toggle" : "Lit [F4]##toggle"))
+        {
+            ToggleLitPreview();
+        }
+        if (isLit)
+        {
+            ImGui.PopStyleColor();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Lighting...##envSettings"))
+        {
+            ImGui.OpenPopup("EnvironmentLightingPopup");
         }
 
         // 2. Grid Snap Selector
@@ -2244,6 +2299,73 @@ public sealed class EditorApp : IDisposable
             {
                 ImGui.CloseCurrentPopup();
             }
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawEnvironmentLightingPopup()
+    {
+        if (ImGui.BeginPopup("EnvironmentLightingPopup"))
+        {
+            ImGui.TextDisabled("Environment & Fog Settings");
+            ImGui.Separator();
+
+            // Ambient lighting
+            ImGui.Text("Ambient Lighting:");
+            Vector3 ambRgb = EnvironmentSettings.AmbientColorNormalized;
+            if (ImGui.ColorEdit3("Ambient Color##ambCol", ref ambRgb))
+            {
+                EnvironmentSettings.AmbientColor = new ColorRgba(
+                    (byte)System.Math.Clamp((int)(ambRgb.X * 255.0f), 0, 255),
+                    (byte)System.Math.Clamp((int)(ambRgb.Y * 255.0f), 0, 255),
+                    (byte)System.Math.Clamp((int)(ambRgb.Z * 255.0f), 0, 255),
+                    255);
+            }
+
+            float ambIntensity = EnvironmentSettings.AmbientIntensity;
+            if (ImGui.SliderFloat("Intensity##ambInt", ref ambIntensity, 0.0f, 2.0f, "%.2f"))
+            {
+                EnvironmentSettings.AmbientIntensity = ambIntensity;
+            }
+
+            ImGui.Separator();
+
+            // Distance fog
+            ImGui.Text("Distance Fog:");
+            bool fogEnabled = EnvironmentSettings.FogEnabled;
+            if (ImGui.Checkbox("Enable Fog##fogEn", ref fogEnabled))
+            {
+                EnvironmentSettings.FogEnabled = fogEnabled;
+            }
+
+            Vector3 fogRgb = EnvironmentSettings.FogColorNormalized;
+            if (ImGui.ColorEdit3("Fog Color##fogCol", ref fogRgb))
+            {
+                EnvironmentSettings.FogColor = new ColorRgba(
+                    (byte)System.Math.Clamp((int)(fogRgb.X * 255.0f), 0, 255),
+                    (byte)System.Math.Clamp((int)(fogRgb.Y * 255.0f), 0, 255),
+                    (byte)System.Math.Clamp((int)(fogRgb.Z * 255.0f), 0, 255),
+                    255);
+            }
+
+            float fogDensity = EnvironmentSettings.FogDensity;
+            if (ImGui.DragFloat("Density##fogDens", ref fogDensity, 0.001f, 0.0001f, 0.2f, "%.4f"))
+            {
+                EnvironmentSettings.FogDensity = fogDensity;
+            }
+
+            ImGui.Separator();
+
+            if (ImGui.Button("Reset Defaults", new Vector2(120, 0)))
+            {
+                EnvironmentSettings.ResetDefaults();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Close", new Vector2(80, 0)))
+            {
+                ImGui.CloseCurrentPopup();
+            }
+
             ImGui.EndPopup();
         }
     }

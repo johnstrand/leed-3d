@@ -23,6 +23,7 @@ public sealed class ViewportRenderer : IDisposable
     private RenderTexture2D _renderTarget;
     private int _currentWidth;
     private int _currentHeight;
+    private readonly LitPreviewShader _litShader = new();
 
     private static readonly Color BgColor = new(30, 33, 38, 255);
     private static readonly Color MinorGridColor = new(52, 57, 65, 255);
@@ -74,31 +75,45 @@ public sealed class ViewportRenderer : IDisposable
         int? csgPreviewCutterId = null,
         Color? csgCutterWireColor = null,
         EditorTextureCache? textureCache = null,
-        EntitySchemaRegistry? entityRegistry = null)
+        EntitySchemaRegistry? entityRegistry = null,
+        EnvironmentLightingSettings? environmentSettings = null)
     {
         if (_renderTarget.Id == 0)
         {
             EnsureSize(1280, 720);
         }
 
+        bool isLitPreview = shadingMode == ViewportShadingMode.LitPreview;
+        EnvironmentLightingSettings env = environmentSettings ?? new EnvironmentLightingSettings();
+
         Raylib.BeginTextureMode(_renderTarget);
-        Raylib.ClearBackground(BgColor);
+
+        Color clearColor = isLitPreview && env.FogEnabled
+            ? new Color((int)env.FogColor.R, (int)env.FogColor.G, (int)env.FogColor.B, 255)
+            : BgColor;
+        Raylib.ClearBackground(clearColor);
 
         Camera3D rlCam = ToRaylibCamera(camera);
         Raylib.BeginMode3D(rlCam);
 
-        if (ShowGrid)
+        if (!isLitPreview && ShowGrid)
         {
             DrawGrid(camera.ProjectionMode, gridStep);
         }
 
-        if (ShowOriginAxes)
+        if (!isLitPreview && ShowOriginAxes)
         {
             DrawOriginAxes();
         }
 
         // Render all visible scene objects
         Rlgl.EnableBackfaceCulling();
+
+        if (isLitPreview)
+        {
+            List<SceneLightData> lights = SceneLightGatherer.GatherLights(scene, camera.Position);
+            _litShader.Begin(camera, lights, env);
+        }
 
         for (int i = 0; i < scene.Objects.Count; i++)
         {
@@ -121,11 +136,19 @@ public sealed class ViewportRenderer : IDisposable
             DrawMeshObject(obj, shadingMode, selection, customEdgeColor, textureCache);
         }
 
+        if (isLitPreview)
+        {
+            _litShader.End();
+        }
+
         // Render gameplay entities and target-link lines
-        DrawEntitiesAndTargetLinks(scene, selection, entityRegistry);
+        if (!isLitPreview)
+        {
+            DrawEntitiesAndTargetLinks(scene, selection, entityRegistry);
+        }
 
         // 1. Render active modal operator infinite guide lines
-        if (modalController is not null && modalController.IsActive)
+        if (!isLitPreview && modalController is not null && modalController.IsActive)
         {
             const float guideExtent = 512.0f;
             Vector3 guideOrigin = modalController.PivotWorld;
@@ -152,7 +175,7 @@ public sealed class ViewportRenderer : IDisposable
             Rlgl.EnableDepthTest();
         }
         // 2. Render 3D Transform Gizmo on top of scene geometry when selection has a valid pivot
-        else if (selection is not null && gizmo is not null)
+        else if (!isLitPreview && selection is not null && gizmo is not null)
         {
             Vector3? pivotOpt = gizmo.IsDragging
                 ? (gizmo.ActiveDragMode == GizmoToolMode.Translate ? gizmo.DragPivotWorld + gizmo.CurrentTranslationDelta : gizmo.DragPivotWorld)
@@ -275,6 +298,8 @@ public sealed class ViewportRenderer : IDisposable
         EditableMesh mesh = obj.Mesh!;
         Matrix4x4 worldMatrix = obj.Transform.GetLocalMatrix();
 
+        bool isLitPreview = shadingMode == ViewportShadingMode.LitPreview;
+
         bool isObjectSelected = selection is not null &&
             selection.Mode == InteractionMode.Object &&
             selection.SelectedObjectIds.Contains(obj.Id);
@@ -321,6 +346,11 @@ public sealed class ViewportRenderer : IDisposable
                     }
                 }
 
+                if (!hasTexture && isLitPreview && Raylib.IsWindowReady())
+                {
+                    Rlgl.SetTexture(Rlgl.GetTextureIdDefault());
+                }
+
                 Rlgl.Begin(DrawMode.Triangles);
 
                 for (int f = 0; f < faces.Count; f++)
@@ -328,8 +358,29 @@ public sealed class ViewportRenderer : IDisposable
                     PolygonFace face = faces[f];
                     Vector3 localNormal = face.ComputeNormal(mesh);
                     Vector3 worldNormal = Vector3.Normalize(obj.Transform.TransformDirectionToWorld(localNormal));
+                    Vector3 worldNormalRh = CoordSpace.ToRightHanded(worldNormal);
 
-                    Color shadedColor = ComputeDirectionalFaceShade(worldNormal, face.MaterialId, hasTexture);
+                    Color shadedColor;
+                    if (isLitPreview)
+                    {
+                        if (hasTexture)
+                        {
+                            shadedColor = new Color(255, 255, 255, 255);
+                        }
+                        else
+                        {
+                            Vector3 baseColor = GetMaterialBaseColor(face.MaterialId);
+                            shadedColor = new Color(
+                                (int)System.Math.Clamp((int)(baseColor.X * 255.0f), 0, 255),
+                                (int)System.Math.Clamp((int)(baseColor.Y * 255.0f), 0, 255),
+                                (int)System.Math.Clamp((int)(baseColor.Z * 255.0f), 0, 255),
+                                255);
+                        }
+                    }
+                    else
+                    {
+                        shadedColor = ComputeDirectionalFaceShade(worldNormal, face.MaterialId, hasTexture);
+                    }
 
                     IReadOnlyList<Vector2> faceUvs = UvProjectionEngine.ComputeFaceUvs(face, mesh, obj.Transform);
                     IReadOnlyList<(int V0, int V1, int V2)> tris = PolygonTriangulator.TriangulateFace(face, mesh);
@@ -370,6 +421,7 @@ public sealed class ViewportRenderer : IDisposable
                         Vector3 p2Rh = CoordSpace.ToRightHanded(Vector3.Transform(mv2.Position, worldMatrix));
 
                         Rlgl.Color4ub(shadedColor.R, shadedColor.G, shadedColor.B, shadedColor.A);
+                        Rlgl.Normal3f(worldNormalRh.X, worldNormalRh.Y, worldNormalRh.Z);
 
                         Rlgl.TexCoord2f(wUv0.X, wUv0.Y);
                         Rlgl.Vertex3f(p0Rh.X, p0Rh.Y, p0Rh.Z);
@@ -384,7 +436,7 @@ public sealed class ViewportRenderer : IDisposable
 
                 Rlgl.End();
 
-                if (hasTexture)
+                if (hasTexture || (isLitPreview && Raylib.IsWindowReady()))
                 {
                     Rlgl.SetTexture(0);
                 }
@@ -393,7 +445,7 @@ public sealed class ViewportRenderer : IDisposable
 
         // Selected faces overlay in Face Mode (semi-transparent orange fill)
         HashSet<EdgeKey>? selectedFaceBoundaryEdges = null;
-        if (isEditModeActive && selection!.Mode == InteractionMode.Face && selection.SelectedFaceIds.Count > 0)
+        if (!isLitPreview && isEditModeActive && selection!.Mode == InteractionMode.Face && selection.SelectedFaceIds.Count > 0)
         {
             selectedFaceBoundaryEdges = [];
             Color selectedFaceFill = new(255, 175, 45, 120);
@@ -447,16 +499,19 @@ public sealed class ViewportRenderer : IDisposable
 
         // Collision-disabled faces visual indicator (translucent magenta/purple fill with hatched lines to centroid)
         bool hasCollisionDisabledFaces = false;
-        for (int i = 0; i < mesh.Faces.Count; i++)
+        if (!isLitPreview)
         {
-            if (mesh.Faces[i].Metadata.IsCollisionDisabled())
+            for (int i = 0; i < mesh.Faces.Count; i++)
             {
-                hasCollisionDisabledFaces = true;
-                break;
+                if (mesh.Faces[i].Metadata.IsCollisionDisabled())
+                {
+                    hasCollisionDisabledFaces = true;
+                    break;
+                }
             }
         }
 
-        if (hasCollisionDisabledFaces)
+        if (!isLitPreview && hasCollisionDisabledFaces)
         {
             Color collisionDisabledFill = new(180, 50, 220, 75);
             Color collisionDisabledHatch = new(215, 80, 255, 200);
@@ -525,7 +580,7 @@ public sealed class ViewportRenderer : IDisposable
         }
 
         // Draw true N-gon topological edges (not internal triangulation diagonals!)
-        if (drawWireframe || isObjectSelected || customEdgeColor.HasValue)
+        if (!isLitPreview && (drawWireframe || isObjectSelected || customEdgeColor.HasValue))
         {
             Color defaultEdgeColor = shadingMode == ViewportShadingMode.Wireframe ? PureWireframeColor : WireframeEdgeColor;
             Color objectHighlightColor = new(255, 140, 30, 255);
@@ -620,13 +675,7 @@ public sealed class ViewportRenderer : IDisposable
         }
 
         // Base color derived from materialId
-        Vector3 baseColor = materialId switch
-        {
-            "dev_grid_orange" => new Vector3(0.90f, 0.52f, 0.22f),
-            "dev_grid_blue" => new Vector3(0.32f, 0.58f, 0.88f),
-            "dev_grid_green" => new Vector3(0.35f, 0.75f, 0.42f),
-            _ => new Vector3(0.68f, 0.71f, 0.75f)
-        };
+        Vector3 baseColor = GetMaterialBaseColor(materialId);
 
         float ndotl1 = System.Math.Max(0.0f, Vector3.Dot(worldNormal, LightDir1));
         float ndotl2 = System.Math.Max(0.0f, Vector3.Dot(worldNormal, LightDir2));
@@ -638,6 +687,17 @@ public sealed class ViewportRenderer : IDisposable
             (byte)System.Math.Clamp((int)(lit.Y * 255.0f), 0, 255),
             (byte)System.Math.Clamp((int)(lit.Z * 255.0f), 0, 255),
             (byte)255);
+    }
+
+    public static Vector3 GetMaterialBaseColor(string materialId)
+    {
+        return materialId switch
+        {
+            "dev_grid_orange" => new Vector3(0.90f, 0.52f, 0.22f),
+            "dev_grid_blue" => new Vector3(0.32f, 0.58f, 0.88f),
+            "dev_grid_green" => new Vector3(0.35f, 0.75f, 0.42f),
+            _ => new Vector3(0.68f, 0.71f, 0.75f)
+        };
     }
 
     private static void DrawTransformGizmo(TransformGizmo3D gizmo, Vector3 pivot, float scale)
@@ -1446,6 +1506,7 @@ public sealed class ViewportRenderer : IDisposable
 
     public void Dispose()
     {
+        _litShader.Dispose();
         if (_renderTarget.Id != 0)
         {
             Raylib.UnloadRenderTexture(_renderTarget);

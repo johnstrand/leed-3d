@@ -192,6 +192,13 @@ public sealed class EditorShortcutHandler
             return;
         }
 
+        // F4: Toggle Lit Preview mode
+        if (Raylib.IsKeyPressed(KeyboardKey.F4))
+        {
+            _app.ToggleLitPreview();
+            return;
+        }
+
         // 6. Viewport Operations when not camera flying
         if (!rmbDown && (isViewportHovered || isViewportFocused))
         {
