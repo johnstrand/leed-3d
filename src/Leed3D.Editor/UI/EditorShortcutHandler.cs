@@ -180,7 +180,29 @@ public sealed class EditorShortcutHandler
             return;
         }
 
-        // 5. Undo (Ctrl+Z) & Redo (Ctrl+Y or Ctrl+Shift+Z)
+        // 5. File Operations
+        if (ctrl && !shift && Raylib.IsKeyPressed(KeyboardKey.N))
+        {
+            _app.PromptNewLevel();
+            return;
+        }
+        else if (ctrl && !shift && Raylib.IsKeyPressed(KeyboardKey.O))
+        {
+            _app.PromptOpenLevel();
+            return;
+        }
+        else if (ctrl && shift && Raylib.IsKeyPressed(KeyboardKey.S))
+        {
+            _app.PromptSaveLevelAs();
+            return;
+        }
+        else if (ctrl && !shift && Raylib.IsKeyPressed(KeyboardKey.S))
+        {
+            _app.SaveLevel();
+            return;
+        }
+
+        // 6. Undo (Ctrl+Z) & Redo (Ctrl+Y or Ctrl+Shift+Z)
         if (ctrl && !shift && Raylib.IsKeyPressed(KeyboardKey.Z))
         {
             if (_app.UndoStack.Undo(_app.Scene))

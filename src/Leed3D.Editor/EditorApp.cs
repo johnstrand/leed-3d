@@ -6,8 +6,10 @@ using Leed3D.Editor.UI.Panels;
 using Leed3D.Editor.Viewport;
 using Leed3D.Kernel.Csg;
 using Leed3D.Kernel.Entities;
+using Leed3D.Kernel.Export;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Gizmos;
+using Leed3D.Kernel.IO;
 using Leed3D.Kernel.Math;
 using Leed3D.Kernel.Modifiers;
 using Leed3D.Kernel.Physics;
@@ -51,11 +53,29 @@ public sealed class EditorApp : IDisposable
     public TextureBrowserPanel TextureBrowser { get; } = new();
     public UvInspectorPanel UvInspector { get; } = new();
     public MetadataInspectorPanel MetadataInspector { get; } = new();
+    public SceneOutlinerPanel Outliner { get; } = new();
     public EntitySchemaRegistry EntityRegistry { get; } = new();
     public EnvironmentLightingSettings EnvironmentSettings { get; } = new();
     public WalkPlayerConfig WalkConfig { get; } = new();
     public WalkController? ActiveWalkController { get; private set; }
     public bool IsWalkModeActive => ActiveWalkController is not null;
+
+    public string? CurrentFilePath { get; set; }
+    private int _savedUndoCount = 0;
+    public bool HasUnsavedChanges => UndoStack.UndoCount != _savedUndoCount;
+
+    private bool _openNewLevelModal;
+    private bool _openOpenLevelModal;
+    private bool _openSaveLevelAsModal;
+    private bool _openExportObjModal;
+    private bool _openExportGltfModal;
+
+    private string _openLevelPath = "samples/temple_blockout.level.json";
+    private string _saveAsLevelPath = "my_level.level.json";
+    private string _exportObjPath = "export/my_level.obj";
+    private bool _exportObjRightHanded = true;
+    private string _exportGltfPath = "export/my_level.gltf";
+    private bool _exportGltfEmbedBase64 = true;
 
     private Vector3 _savedWalkCamPosition;
     private Vector3 _savedWalkCamTarget;
@@ -392,11 +412,12 @@ public sealed class EditorApp : IDisposable
         ImGui.End();
 
         DrawViewportWindow(dt);
-        DrawSceneSummaryPanel();
+        Outliner.Draw(this);
         DrawCsgPanel();
         TextureBrowser.Draw(this);
         UvInspector.Draw(this);
         MetadataInspector.Draw(this);
+        DrawFileModals();
         DrawStatusBar(mainViewport, statusBarHeight);
     }
 
@@ -411,12 +432,37 @@ public sealed class EditorApp : IDisposable
         {
             if (ImGui.MenuItem("New Level", "Ctrl+N"))
             {
-                EditorScene before = Scene.CloneSnapshot();
-                Scene.RestoreFromSnapshot(new EditorScene("Untitled Level"));
-                UndoStack.RecordAction("New Level", before, Scene);
-                PrimitiveController.Dismiss();
-                _statusMessage = "Created new empty level.";
+                PromptNewLevel();
             }
+
+            if (ImGui.MenuItem("Open Level...", "Ctrl+O"))
+            {
+                PromptOpenLevel();
+            }
+
+            if (ImGui.MenuItem("Save Level", "Ctrl+S"))
+            {
+                SaveLevel();
+            }
+
+            if (ImGui.MenuItem("Save Level As...", "Ctrl+Shift+S"))
+            {
+                PromptSaveLevelAs();
+            }
+
+            ImGui.Separator();
+
+            if (ImGui.MenuItem("Export Wavefront .obj..."))
+            {
+                PromptExportObj();
+            }
+
+            if (ImGui.MenuItem("Export glTF 2.0 (.gltf)..."))
+            {
+                PromptExportGltf();
+            }
+
+            ImGui.Separator();
 
             if (ImGui.MenuItem("Reset Starter Scene"))
             {
@@ -547,9 +593,20 @@ public sealed class EditorApp : IDisposable
 
         if (ImGui.BeginMenu("Window"))
         {
+            ImGui.MenuItem("Scene Outliner", null, true);
+            ImGui.MenuItem("Transform Inspector", null, true);
             ImGui.MenuItem("Texture Browser", null, true);
             ImGui.MenuItem("UV Inspector", null, true);
             ImGui.MenuItem("Metadata Inspector", null, true);
+            ImGui.EndMenu();
+        }
+
+        if (ImGui.BeginMenu("Help"))
+        {
+            if (ImGui.MenuItem("Load Sample Temple Blockout Level"))
+            {
+                LoadSampleTempleBlockout();
+            }
             ImGui.EndMenu();
         }
 
@@ -2008,31 +2065,335 @@ public sealed class EditorApp : IDisposable
         }
     }
 
-    private void DrawSceneSummaryPanel()
+    public void PromptNewLevel()
     {
-        ImGui.Begin("Scene Outliner");
-        ImGui.Text($"Scene: {Scene.Name}");
-        ImGui.TextDisabled($"Objects: {Scene.ObjectCount}");
-        ImGui.Separator();
-
-        for (int i = 0; i < Scene.Objects.Count; i++)
+        if (HasUnsavedChanges)
         {
-            SceneObject obj = Scene.Objects[i];
-            int vertCount = obj.Mesh?.VertexCount ?? 0;
-            int faceCount = obj.Mesh?.FaceCount ?? 0;
-            bool isActiveCreation = PrimitiveController.ActiveObject?.Id == obj.Id;
-            if (isActiveCreation)
-            {
-                ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1.0f, 0.85f, 0.3f, 1.0f));
-            }
-            ImGui.BulletText($"{obj.Name} (V:{vertCount}, F:{faceCount}){(isActiveCreation ? " [Active]" : "")}");
-            if (isActiveCreation)
-            {
-                ImGui.PopStyleColor();
-            }
+            _openNewLevelModal = true;
+        }
+        else
+        {
+            CreateNewLevel();
+        }
+    }
+
+    public void CreateNewLevel()
+    {
+        EditorScene before = Scene.CloneSnapshot();
+        Scene.RestoreFromSnapshot(new EditorScene("Untitled Level"));
+        CurrentFilePath = null;
+        _savedUndoCount = 0;
+        UndoStack.RecordAction("New Level", before, Scene);
+        Selection.ClearSelection();
+        PrimitiveController.Dismiss();
+        StatusMessage = "Created new empty level.";
+    }
+
+    public void PromptOpenLevel()
+    {
+        _openOpenLevelModal = true;
+    }
+
+    public void LoadLevel(string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+        {
+            StatusMessage = $"Level file does not exist: {filePath}";
+            return;
         }
 
-        ImGui.End();
+        try
+        {
+            EditorScene loaded = LevelSerializer.LoadEditorScene(filePath);
+            EditorScene before = Scene.CloneSnapshot();
+            Scene.RestoreFromSnapshot(loaded);
+            CurrentFilePath = filePath;
+            _savedUndoCount = UndoStack.UndoCount;
+            UndoStack.RecordAction($"Open Level {Path.GetFileName(filePath)}", before, Scene);
+            Selection.ClearSelection();
+            PrimitiveController.Dismiss();
+            StatusMessage = $"Loaded level from {filePath}.";
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Failed to load level: {ex.Message}";
+        }
+    }
+
+    public void SaveLevel()
+    {
+        if (!string.IsNullOrWhiteSpace(CurrentFilePath))
+        {
+            SaveLevelAs(CurrentFilePath);
+        }
+        else
+        {
+            PromptSaveLevelAs();
+        }
+    }
+
+    public void PromptSaveLevelAs()
+    {
+        _openSaveLevelAsModal = true;
+    }
+
+    public void SaveLevelAs(string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            return;
+        }
+
+        try
+        {
+            LevelSerializer.Save(Scene, filePath, bakeRightHandedRuntime: false);
+            CurrentFilePath = filePath;
+            _savedUndoCount = UndoStack.UndoCount;
+            StatusMessage = $"Saved level to {filePath}.";
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = $"Failed to save level: {ex.Message}";
+        }
+    }
+
+    public void PromptExportObj()
+    {
+        _openExportObjModal = true;
+    }
+
+    public void PromptExportGltf()
+    {
+        _openExportGltfModal = true;
+    }
+
+    public void LoadSampleTempleBlockout()
+    {
+        EditorScene sample = SampleLevelFactory.CreateTempleBlockout();
+        EditorScene before = Scene.CloneSnapshot();
+        Scene.RestoreFromSnapshot(sample);
+        CurrentFilePath = "samples/temple_blockout.level.json";
+        _savedUndoCount = UndoStack.UndoCount;
+        UndoStack.RecordAction("Load Temple Blockout", before, Scene);
+        Selection.ClearSelection();
+        PrimitiveController.Dismiss();
+        StatusMessage = "Loaded Sample Temple Blockout Level. Press F4 for Lit Preview or F5 for Walk Mode!";
+    }
+
+    private void DrawFileModals()
+    {
+        if (_openNewLevelModal)
+        {
+            ImGui.OpenPopup("Unsaved Changes##NewLevelModal");
+            _openNewLevelModal = false;
+        }
+        if (_openOpenLevelModal)
+        {
+            ImGui.OpenPopup("Open Level (.level.json)##OpenLevelModal");
+            _openOpenLevelModal = false;
+        }
+        if (_openSaveLevelAsModal)
+        {
+            ImGui.OpenPopup("Save Level As (.level.json)##SaveLevelAsModal");
+            _openSaveLevelAsModal = false;
+        }
+        if (_openExportObjModal)
+        {
+            ImGui.OpenPopup("Export Wavefront .obj##ExportObjModal");
+            _openExportObjModal = false;
+        }
+        if (_openExportGltfModal)
+        {
+            ImGui.OpenPopup("Export glTF 2.0 (.gltf)##ExportGltfModal");
+            _openExportGltfModal = false;
+        }
+
+        DrawNewLevelModal();
+        DrawOpenLevelModal();
+        DrawSaveLevelAsModal();
+        DrawExportObjModal();
+        DrawExportGltfModal();
+    }
+
+    private void DrawNewLevelModal()
+    {
+        bool isOpen = true;
+        if (ImGui.BeginPopupModal("Unsaved Changes##NewLevelModal", ref isOpen, ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            ImGui.Text("You have unsaved changes in the current level.\nDo you want to save before creating a new level?");
+            ImGui.Separator();
+
+            if (ImGui.Button("Save##NewLevelSave", new Vector2(100, 0)))
+            {
+                SaveLevel();
+                CreateNewLevel();
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Don't Save##NewLevelDiscard", new Vector2(100, 0)))
+            {
+                CreateNewLevel();
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel##NewLevelCancel", new Vector2(100, 0)))
+            {
+                ImGui.CloseCurrentPopup();
+            }
+
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawOpenLevelModal()
+    {
+        bool isOpen = true;
+        if (ImGui.BeginPopupModal("Open Level (.level.json)##OpenLevelModal", ref isOpen, ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            ImGui.SetNextItemWidth(450);
+            ImGui.InputText("File Path##OpenLevelInput", ref _openLevelPath, 256);
+
+            ImGui.TextDisabled("Available Level Files:");
+            if (ImGui.BeginChild("OpenLevelFileList", new Vector2(450, 160)))
+            {
+                var candidates = new List<string>();
+                if (Directory.Exists("samples"))
+                {
+                    candidates.AddRange(Directory.GetFiles("samples", "*.level.json"));
+                }
+                if (Directory.Exists("."))
+                {
+                    candidates.AddRange(Directory.GetFiles(".", "*.level.json"));
+                }
+
+                foreach (string candidate in candidates.Distinct())
+                {
+                    string norm = candidate.Replace('\\', '/');
+                    bool isSelected = _openLevelPath.Replace('\\', '/') == norm;
+                    if (ImGui.Selectable(norm, isSelected))
+                    {
+                        _openLevelPath = norm;
+                    }
+                    if (ImGui.IsItemHovered() && ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left))
+                    {
+                        _openLevelPath = norm;
+                        LoadLevel(_openLevelPath);
+                        ImGui.CloseCurrentPopup();
+                    }
+                }
+                ImGui.EndChild();
+            }
+
+            ImGui.Separator();
+
+            if (ImGui.Button("Open##OpenLevelConfirm", new Vector2(120, 0)))
+            {
+                LoadLevel(_openLevelPath);
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel##OpenLevelCancel", new Vector2(120, 0)))
+            {
+                ImGui.CloseCurrentPopup();
+            }
+
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawSaveLevelAsModal()
+    {
+        bool isOpen = true;
+        if (ImGui.BeginPopupModal("Save Level As (.level.json)##SaveLevelAsModal", ref isOpen, ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            ImGui.SetNextItemWidth(400);
+            ImGui.InputText("Destination File##SaveAsInput", ref _saveAsLevelPath, 256);
+
+            ImGui.Separator();
+
+            if (ImGui.Button("Save##SaveAsConfirm", new Vector2(100, 0)))
+            {
+                SaveLevelAs(_saveAsLevelPath);
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel##SaveAsCancel", new Vector2(100, 0)))
+            {
+                ImGui.CloseCurrentPopup();
+            }
+
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawExportObjModal()
+    {
+        bool isOpen = true;
+        if (ImGui.BeginPopupModal("Export Wavefront .obj##ExportObjModal", ref isOpen, ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            ImGui.SetNextItemWidth(400);
+            ImGui.InputText("Output Path##ExportObjInput", ref _exportObjPath, 256);
+
+            ImGui.Checkbox("Convert to Right-Handed (OpenGL / glTF standard)", ref _exportObjRightHanded);
+
+            ImGui.Separator();
+
+            if (ImGui.Button("Export##ExportObjConfirm", new Vector2(100, 0)))
+            {
+                try
+                {
+                    ObjExporter.Export(Scene, _exportObjPath, _exportObjRightHanded);
+                    StatusMessage = $"Exported Wavefront OBJ to {_exportObjPath}";
+                }
+                catch (Exception ex)
+                {
+                    StatusMessage = $"Export OBJ failed: {ex.Message}";
+                }
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel##ExportObjCancel", new Vector2(100, 0)))
+            {
+                ImGui.CloseCurrentPopup();
+            }
+
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawExportGltfModal()
+    {
+        bool isOpen = true;
+        if (ImGui.BeginPopupModal("Export glTF 2.0 (.gltf)##ExportGltfModal", ref isOpen, ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            ImGui.SetNextItemWidth(400);
+            ImGui.InputText("Output Path##ExportGltfInput", ref _exportGltfPath, 256);
+
+            ImGui.Checkbox("Embed Binary Buffer as Base64", ref _exportGltfEmbedBase64);
+
+            ImGui.Separator();
+
+            if (ImGui.Button("Export##ExportGltfConfirm", new Vector2(100, 0)))
+            {
+                try
+                {
+                    GltfExporter.Export(Scene, _exportGltfPath, _exportGltfEmbedBase64);
+                    StatusMessage = $"Exported glTF 2.0 to {_exportGltfPath}";
+                }
+                catch (Exception ex)
+                {
+                    StatusMessage = $"Export glTF failed: {ex.Message}";
+                }
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel##ExportGltfCancel", new Vector2(100, 0)))
+            {
+                ImGui.CloseCurrentPopup();
+            }
+
+            ImGui.EndPopup();
+        }
     }
 
     private void DrawCsgPanel()
