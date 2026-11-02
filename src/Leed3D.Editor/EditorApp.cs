@@ -35,6 +35,7 @@ namespace Leed3D.Editor;
 public sealed class EditorApp : IDisposable
 {
     private readonly ViewportRenderer _viewportRenderer = new();
+    private readonly EditorSettings _settings;
     private bool _exitRequested;
 
     public EditorScene Scene { get; } = new("Untitled Level");
@@ -303,6 +304,16 @@ public sealed class EditorApp : IDisposable
         TextureCache = new EditorTextureCache(MaterialLibrary);
         PrimitiveController = new PrimitiveCreationController(Scene, UndoStack);
         ShortcutHandler = new EditorShortcutHandler(this);
+        try
+        {
+            _settings = EditorSettings.Load();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or System.Text.Json.JsonException)
+        {
+            _settings = new EditorSettings();
+            _statusMessage = $"Ignoring invalid editor settings ({ex.Message}); using defaults.";
+        }
+
         if (File.Exists("entities.schema.json"))
         {
             try
@@ -334,7 +345,7 @@ public sealed class EditorApp : IDisposable
         Raylib.SetTargetFPS(60);
         Raylib.SetExitKey(KeyboardKey.Null); // Reserve Esc for canceling modal/gizmo operations
 
-        RlImGui.Setup(darkTheme: true, enableDocking: true);
+        RlImGui.Setup(darkTheme: true, enableDocking: true, _settings.UiScaleMultiplier);
         _viewportRenderer.EnsureSize(1280, 720);
 
         while (!Raylib.WindowShouldClose())
@@ -382,6 +393,18 @@ public sealed class EditorApp : IDisposable
     private void HandleGlobalShortcuts()
     {
         ShortcutHandler.HandleShortcuts(_isViewportHovered, _isViewportFocused, _viewportLocalMousePos, _viewportRenderer.ViewportSize);
+    }
+
+    private void SaveSettings()
+    {
+        try
+        {
+            _settings.Save();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _statusMessage = $"Failed to save editor settings: {ex.Message}";
+        }
     }
 
     private void DrawDockspaceAndBars(float dt)
@@ -593,6 +616,22 @@ public sealed class EditorApp : IDisposable
             if (ImGui.MenuItem("Environment & Fog Settings..."))
             {
                 ImGui.OpenPopup("EnvironmentLightingPopup");
+            }
+
+            ImGui.Separator();
+            float uiScalePercent = _settings.UiScaleMultiplier * 100.0f;
+            if (ImGui.SliderFloat("UI Scale", ref uiScalePercent,
+                    EditorSettings.MinimumUiScaleMultiplier * 100.0f,
+                    EditorSettings.MaximumUiScaleMultiplier * 100.0f,
+                    "%.0f%%",
+                    ImGuiSliderFlags.AlwaysClamp))
+            {
+                _settings.UiScaleMultiplier = uiScalePercent / 100.0f;
+                RlImGui.SetUserScaleMultiplier(_settings.UiScaleMultiplier);
+            }
+            if (ImGui.IsItemDeactivatedAfterEdit())
+            {
+                SaveSettings();
             }
 
             ImGui.EndMenu();

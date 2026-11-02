@@ -14,6 +14,8 @@ public static unsafe class RlImGui
 {
     private static IntPtr _imGuiContext;
     private static IntPtr _iniFilenameMemory;
+    private static float _userScaleMultiplier = 1.0f;
+    private static float _appliedUiScale = 1.0f;
     private static Texture2D _fontTexture;
     private static readonly Dictionary<uint, Texture2D> _boundTextures = new();
 
@@ -125,7 +127,7 @@ public static unsafe class RlImGui
         (KeyboardKey.F12, ImGuiKey.F12)
     ];
 
-    public static void Setup(bool darkTheme = true, bool enableDocking = true)
+    public static void Setup(bool darkTheme = true, bool enableDocking = true, float userScaleMultiplier = 1.0f)
     {
         _imGuiContext = ImGui.CreateContext();
         ImGui.SetCurrentContext(_imGuiContext);
@@ -152,6 +154,12 @@ public static unsafe class RlImGui
             ImGui.StyleColorsClassic();
         }
 
+        _userScaleMultiplier = Math.Clamp(
+            userScaleMultiplier,
+            EditorSettings.MinimumUiScaleMultiplier,
+            EditorSettings.MaximumUiScaleMultiplier);
+        _appliedUiScale = 1.0f;
+        UpdateUiScale(Raylib.GetWindowScaleDPI());
         ReloadFonts();
     }
 
@@ -204,6 +212,8 @@ public static unsafe class RlImGui
     {
         ImGui.SetCurrentContext(_imGuiContext);
         ImGuiIOPtr io = ImGui.GetIO();
+        Vector2 scale = Raylib.GetWindowScaleDPI();
+        UpdateUiScale(scale);
 
         if (Raylib.IsWindowFullscreen())
         {
@@ -215,7 +225,6 @@ public static unsafe class RlImGui
             io.DisplaySize = new Vector2(Raylib.GetScreenWidth(), Raylib.GetScreenHeight());
         }
 
-        Vector2 scale = Raylib.GetWindowScaleDPI();
         io.DisplayFramebufferScale = new Vector2(
             scale.X > 0.0f ? scale.X : 1.0f,
             scale.Y > 0.0f ? scale.Y : 1.0f);
@@ -227,6 +236,40 @@ public static unsafe class RlImGui
         UpdateKeyboard(io);
 
         ImGui.NewFrame();
+    }
+
+    public static void SetUserScaleMultiplier(float multiplier)
+    {
+        if (!float.IsFinite(multiplier) ||
+            multiplier < EditorSettings.MinimumUiScaleMultiplier ||
+            multiplier > EditorSettings.MaximumUiScaleMultiplier)
+        {
+            throw new ArgumentOutOfRangeException(nameof(multiplier));
+        }
+
+        _userScaleMultiplier = multiplier;
+        if (_imGuiContext != IntPtr.Zero)
+        {
+            ImGui.SetCurrentContext(_imGuiContext);
+            UpdateUiScale(Raylib.GetWindowScaleDPI());
+        }
+    }
+
+    // Effective scale = monitor DPI scale × user multiplier; style sizes are rescaled by the delta.
+    private static void UpdateUiScale(Vector2 dpiScale)
+    {
+        float dpiMultiplier = MathF.Max(
+            dpiScale.X > 0.0f ? dpiScale.X : 1.0f,
+            dpiScale.Y > 0.0f ? dpiScale.Y : 1.0f);
+        float newScale = dpiMultiplier * _userScaleMultiplier;
+        if (MathF.Abs(newScale - _appliedUiScale) < 0.001f)
+        {
+            return;
+        }
+
+        ImGui.GetStyle().ScaleAllSizes(newScale / _appliedUiScale);
+        ImGui.GetIO().FontGlobalScale = newScale;
+        _appliedUiScale = newScale;
     }
 
     private static void UpdateMouse(ImGuiIOPtr io)
