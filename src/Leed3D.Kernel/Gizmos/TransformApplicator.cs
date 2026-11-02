@@ -319,7 +319,7 @@ public sealed class TransformApplicator
                 {
                     Vector3 offset = snap.StartPosition - PivotWorld;
                     obj.Transform.Position = PivotWorld + Vector3.Transform(offset, worldRotationDelta);
-                    obj.Transform.RotationEulerDegrees = snap.StartRotationEulerDegrees + eulerDeltaDegrees;
+                    obj.Transform.SetRotationFromQuaternion(Quaternion.Normalize(Quaternion.Concatenate(snap.StartRotationQuaternion, worldRotationDelta)));
 
                     if (obj.Mesh is { } objMesh)
                     {
