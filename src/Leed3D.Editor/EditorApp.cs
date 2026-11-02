@@ -35,6 +35,7 @@ namespace Leed3D.Editor;
 public sealed class EditorApp : IDisposable
 {
     private readonly ViewportRenderer _viewportRenderer = new();
+    private bool _exitRequested;
 
     public EditorScene Scene { get; } = new("Untitled Level");
     public UndoRedoStack UndoStack { get; } = new();
@@ -369,6 +370,12 @@ public sealed class EditorApp : IDisposable
             RlImGui.End();
 
             Raylib.EndDrawing();
+
+            // Leave the loop only after the frame is finished; Dispose() closes the window.
+            if (_exitRequested)
+            {
+                break;
+            }
         }
     }
 
@@ -477,7 +484,7 @@ public sealed class EditorApp : IDisposable
             ImGui.Separator();
             if (ImGui.MenuItem("Exit"))
             {
-                Raylib.CloseWindow();
+                _exitRequested = true;
             }
             ImGui.EndMenu();
         }
