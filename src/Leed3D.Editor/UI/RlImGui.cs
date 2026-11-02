@@ -13,6 +13,7 @@ namespace Leed3D.Editor.UI;
 public static unsafe class RlImGui
 {
     private static IntPtr _imGuiContext;
+    private static IntPtr _iniFilenameMemory;
     private static Texture2D _fontTexture;
     private static readonly Dictionary<uint, Texture2D> _boundTextures = new();
 
@@ -129,7 +130,11 @@ public static unsafe class RlImGui
         _imGuiContext = ImGui.CreateContext();
         ImGui.SetCurrentContext(_imGuiContext);
 
+        // ImGui keeps this pointer for the lifetime of the context, so it is freed in Shutdown().
+        Directory.CreateDirectory(EditorSettings.ConfigDirectory);
         ImGuiIOPtr io = ImGui.GetIO();
+        _iniFilenameMemory = Marshal.StringToCoTaskMemUTF8(EditorSettings.ImGuiIniPath);
+        io.NativePtr->IniFilename = (byte*)_iniFilenameMemory;
         if (enableDocking)
         {
             io.ConfigFlags |= ImGuiConfigFlags.DockingEnable;
@@ -402,6 +407,12 @@ public static unsafe class RlImGui
         {
             ImGui.DestroyContext(_imGuiContext);
             _imGuiContext = IntPtr.Zero;
+        }
+
+        if (_iniFilenameMemory != IntPtr.Zero)
+        {
+            Marshal.FreeCoTaskMem(_iniFilenameMemory);
+            _iniFilenameMemory = IntPtr.Zero;
         }
     }
 }
