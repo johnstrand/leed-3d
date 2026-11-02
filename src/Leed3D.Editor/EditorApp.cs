@@ -37,6 +37,7 @@ public sealed class EditorApp : IDisposable
     private readonly ViewportRenderer _viewportRenderer = new();
     private readonly EditorSettings _settings;
     private bool _exitRequested;
+    private bool _resetLayoutRequested;
 
     public EditorScene Scene { get; } = new("Untitled Level");
     public UndoRedoStack UndoStack { get; } = new();
@@ -438,6 +439,11 @@ public sealed class EditorApp : IDisposable
         ImGui.PopStyleVar(3);
 
         uint dockspaceId = ImGui.GetID("Leed3DDockSpace");
+        if (_resetLayoutRequested || !DockBuilder.NodeExists(dockspaceId))
+        {
+            _resetLayoutRequested = false;
+            BuildDefaultDockLayout(dockspaceId, workSize);
+        }
         ImGui.DockSpace(dockspaceId, Vector2.Zero, ImGuiDockNodeFlags.PassthruCentralNode);
         ImGui.End();
 
@@ -449,6 +455,30 @@ public sealed class EditorApp : IDisposable
         MetadataInspector.Draw(this);
         DrawFileModals();
         DrawStatusBar(mainViewport, statusBarHeight);
+    }
+
+    /// <summary>
+    /// Builds the default layout: the 3D viewport fills the workspace except for a right-hand panel column.
+    /// Only runs when no saved dock layout exists or when View > Reset Layout is chosen.
+    /// </summary>
+    private static void BuildDefaultDockLayout(uint dockspaceId, Vector2 workSize)
+    {
+        DockBuilder.ResetDockSpace(dockspaceId, workSize);
+
+        float panelColumnWidth = System.Math.Clamp(workSize.X * 0.22f, 280.0f, 420.0f);
+        float panelColumnRatio = System.Math.Clamp(panelColumnWidth / System.Math.Max(workSize.X, 1.0f), 0.1f, 0.4f);
+        uint panelColumn = DockBuilder.SplitNode(dockspaceId, ImGuiDir.Right, panelColumnRatio, out uint viewportNode);
+        uint outlinerNode = DockBuilder.SplitNode(panelColumn, ImGuiDir.Up, 0.35f, out uint lowerPanels);
+        uint inspectorNode = DockBuilder.SplitNode(lowerPanels, ImGuiDir.Up, 0.35f, out uint toolPanels);
+
+        DockBuilder.DockWindow("3D Viewport", viewportNode);
+        DockBuilder.DockWindow("Scene Outliner", outlinerNode);
+        DockBuilder.DockWindow("Transform Inspector", inspectorNode);
+        DockBuilder.DockWindow("Texture Browser", toolPanels);
+        DockBuilder.DockWindow("UV Inspector", toolPanels);
+        DockBuilder.DockWindow("Metadata Inspector", toolPanels);
+        DockBuilder.DockWindow("CSG Booleans", toolPanels);
+        DockBuilder.Finish(dockspaceId);
     }
 
     private void DrawTopMenuBar()
@@ -632,6 +662,12 @@ public sealed class EditorApp : IDisposable
             if (ImGui.IsItemDeactivatedAfterEdit())
             {
                 SaveSettings();
+            }
+
+            if (ImGui.MenuItem("Reset Layout"))
+            {
+                _resetLayoutRequested = true;
+                _statusMessage = "Reset editor layout.";
             }
 
             ImGui.EndMenu();
