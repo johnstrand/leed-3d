@@ -1,5 +1,6 @@
 using System.Numerics;
 using Leed3D.Kernel.Geometry;
+using Leed3D.Kernel.Math;
 
 namespace Leed3D.Tests.Geometry;
 
@@ -190,5 +191,40 @@ public class EditableMeshAndTopologyTests
         EditableMesh invertedFaceCube = CreateUnitCubeMesh();
         invertedFaceCube.FlipNormals([1]);
         Assert.False(invertedFaceCube.GetTopology().IsClosedManifold());
+    }
+
+    [Fact]
+    public void EditableMesh_CachesFaceTriangulationNormalsBoundsAndMaterials_AndInvalidatesOnMutation()
+    {
+        EditableMesh cube = CreateUnitCubeMesh();
+        PolygonFace face = cube.Faces[0];
+
+        var tris1 = face.GetTrianglesWithLocalIndices(cube);
+        var tris2 = face.GetTrianglesWithLocalIndices(cube);
+        Assert.Same(tris1, tris2);
+        Assert.Equal(2, tris1.Count);
+        Assert.Equal(face.VertexIds[tris1[0].I0], tris1[0].V0);
+        Assert.Equal(face.VertexIds[tris1[0].I1], tris1[0].V1);
+        Assert.Equal(face.VertexIds[tris1[0].I2], tris1[0].V2);
+
+        var matGroups1 = cube.GetFacesByMaterial();
+        var matGroups2 = cube.GetFacesByMaterial();
+        Assert.Same(matGroups1, matGroups2);
+        Assert.Equal(6, matGroups1.Count);
+
+        face.MaterialId = "wall_back";
+        var matGroups3 = cube.GetFacesByMaterial();
+        Assert.NotSame(matGroups1, matGroups3);
+        Assert.Equal(5, matGroups3.Count);
+
+        BoundingBox3D boundsBefore = cube.ComputeBoundingBox();
+        int vId = face.VertexIds[0];
+        cube.GetVertex(vId)!.Position += new Vector3(10.0f, 0.0f, 0.0f);
+
+        BoundingBox3D boundsAfter = cube.ComputeBoundingBox();
+        Assert.NotEqual(boundsBefore.Max, boundsAfter.Max);
+
+        var trisAfterMove = face.GetTrianglesWithLocalIndices(cube);
+        Assert.NotSame(tris1, trisAfterMove);
     }
 }

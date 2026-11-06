@@ -114,7 +114,7 @@ public static class ObjExporter
 
                 foreach (PolygonFace face in matGroup)
                 {
-                    IReadOnlyList<(int V0, int V1, int V2)> tris = PolygonTriangulator.TriangulateFace(face, mesh);
+                    IReadOnlyList<FaceTriangle> tris = face.GetTrianglesWithLocalIndices(mesh);
                     if (tris.Count == 0)
                     {
                         continue;
@@ -126,7 +126,10 @@ public static class ObjExporter
 
                     for (int tIdx = 0; tIdx < tris.Count; tIdx++)
                     {
-                        var (v0Id, v1Id, v2Id) = tris[tIdx];
+                        FaceTriangle tri = tris[tIdx];
+                        int v0Id = tri.V0;
+                        int v1Id = tri.V1;
+                        int v2Id = tri.V2;
 
                         MeshVertex? mv0 = mesh.GetVertex(v0Id);
                         MeshVertex? mv1 = mesh.GetVertex(v1Id);
@@ -136,9 +139,9 @@ public static class ObjExporter
                             continue;
                         }
 
-                        int idx0 = face.VertexIds.IndexOf(v0Id);
-                        int idx1 = face.VertexIds.IndexOf(v1Id);
-                        int idx2 = face.VertexIds.IndexOf(v2Id);
+                        int idx0 = tri.I0;
+                        int idx1 = tri.I1;
+                        int idx2 = tri.I2;
 
                         Vector2 uv0 = idx0 >= 0 && idx0 < faceUvs.Count ? faceUvs[idx0] : Vector2.Zero;
                         Vector2 uv1 = idx1 >= 0 && idx1 < faceUvs.Count ? faceUvs[idx1] : Vector2.Zero;

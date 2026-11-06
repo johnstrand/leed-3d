@@ -14,9 +14,27 @@ public static class PolygonTriangulator
 
     /// <summary>
     /// Triangulates a single <see cref="PolygonFace"/> into a list of vertex ID triplets (V0, V1, V2)
-    /// whose winding matches the face's outward normal.
+    /// whose winding matches the face's outward normal. Uses the face's cached triangulation when valid.
     /// </summary>
     public static IReadOnlyList<(int V0, int V1, int V2)> TriangulateFace(PolygonFace face, EditableMesh mesh)
+    {
+        ArgumentNullException.ThrowIfNull(face);
+        ArgumentNullException.ThrowIfNull(mesh);
+        return face.GetTriangles(mesh);
+    }
+
+    /// <summary>
+    /// Triangulates a single <see cref="PolygonFace"/> into <see cref="FaceTriangle"/> entries containing both
+    /// mesh vertex IDs and 0-based loop indices within <see cref="PolygonFace.VertexIds"/>.
+    /// </summary>
+    public static IReadOnlyList<FaceTriangle> TriangulateFaceWithLocalIndices(PolygonFace face, EditableMesh mesh)
+    {
+        ArgumentNullException.ThrowIfNull(face);
+        ArgumentNullException.ThrowIfNull(mesh);
+        return face.GetTrianglesWithLocalIndices(mesh);
+    }
+
+    internal static IReadOnlyList<FaceTriangle> ComputeFaceTrianglesWithIndices(PolygonFace face, EditableMesh mesh)
     {
         ArgumentNullException.ThrowIfNull(face);
         ArgumentNullException.ThrowIfNull(mesh);
@@ -31,7 +49,7 @@ public static class PolygonTriangulator
         // Fast path for triangles
         if (n == 3)
         {
-            return [(vertexIds[0], vertexIds[1], vertexIds[2])];
+            return [new FaceTriangle(vertexIds[0], vertexIds[1], vertexIds[2], 0, 1, 2)];
         }
 
         // Collect 3D vertex positions
@@ -61,16 +79,16 @@ public static class PolygonTriangulator
             {
                 return
                 [
-                    (vertexIds[0], vertexIds[1], vertexIds[2]),
-                    (vertexIds[0], vertexIds[2], vertexIds[3])
+                    new FaceTriangle(vertexIds[0], vertexIds[1], vertexIds[2], 0, 1, 2),
+                    new FaceTriangle(vertexIds[0], vertexIds[2], vertexIds[3], 0, 2, 3)
                 ];
             }
             else
             {
                 return
                 [
-                    (vertexIds[0], vertexIds[1], vertexIds[3]),
-                    (vertexIds[1], vertexIds[2], vertexIds[3])
+                    new FaceTriangle(vertexIds[0], vertexIds[1], vertexIds[3], 0, 1, 3),
+                    new FaceTriangle(vertexIds[1], vertexIds[2], vertexIds[3], 1, 2, 3)
                 ];
             }
         }
@@ -82,7 +100,7 @@ public static class PolygonTriangulator
             remaining.Add(i);
         }
 
-        var triangles = new List<(int V0, int V1, int V2)>(n - 2);
+        var triangles = new List<FaceTriangle>(n - 2);
 
         // Ensure signed 2D area is positive; if numerical noise inverted the projection sign, flip 2D X
         float signedArea2 = ComputeSignedDoubleArea(poly2D);
@@ -185,13 +203,16 @@ public static class PolygonTriangulator
             int earCurr = remaining[bestEarIdx];
             int earNext = remaining[(bestEarIdx + 1) % count];
 
-            triangles.Add((vertexIds[earPrev], vertexIds[earCurr], vertexIds[earNext]));
+            triangles.Add(new FaceTriangle(vertexIds[earPrev], vertexIds[earCurr], vertexIds[earNext], earPrev, earCurr, earNext));
             remaining.RemoveAt(bestEarIdx);
         }
 
         if (remaining.Count == 3)
         {
-            triangles.Add((vertexIds[remaining[0]], vertexIds[remaining[1]], vertexIds[remaining[2]]));
+            int i0 = remaining[0];
+            int i1 = remaining[1];
+            int i2 = remaining[2];
+            triangles.Add(new FaceTriangle(vertexIds[i0], vertexIds[i1], vertexIds[i2], i0, i1, i2));
         }
 
         return triangles;

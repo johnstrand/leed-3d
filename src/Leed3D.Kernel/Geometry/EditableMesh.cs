@@ -6,24 +6,47 @@ using Leed3D.Runtime.Metadata;
 namespace Leed3D.Kernel.Geometry;
 
 /// <summary>
+/// Represents a single triangulated triangle of a <see cref="PolygonFace"/>, storing both
+/// the mesh vertex IDs (<see cref="V0"/>, <see cref="V1"/>, <see cref="V2"/>) and their
+/// 0-based loop indices within <see cref="PolygonFace.VertexIds"/> (<see cref="I0"/>, <see cref="I1"/>, <see cref="I2"/>).
+/// </summary>
+public readonly record struct FaceTriangle(int V0, int V1, int V2, int I0, int I1, int I2);
+
+/// <summary>
 /// Represents a single vertex with a stable unique ID, 3D position, and granular metadata inside an <see cref="EditableMesh"/>.
 /// </summary>
 public sealed class MeshVertex
 {
+    private Vector3 _position;
+    internal EditableMesh? Owner { get; set; }
+
     public int Id { get; }
-    public Vector3 Position { get; set; }
+
+    public Vector3 Position
+    {
+        get => _position;
+        set
+        {
+            if (_position != value)
+            {
+                _position = value;
+                Owner?.OnVertexPositionChanged();
+            }
+        }
+    }
+
     public ElementMetadata Metadata { get; set; }
 
     public MeshVertex(int id, Vector3 position, ElementMetadata? metadata = null)
     {
         Id = id;
-        Position = position;
+        _position = position;
         Metadata = metadata ?? new ElementMetadata();
     }
 
     public MeshVertex Clone()
     {
-        return new MeshVertex(Id, Position, Metadata.Clone());
+        return new MeshVertex(Id, _position, Metadata.Clone());
     }
 }
 
@@ -34,9 +57,34 @@ public sealed class PolygonFace
 {
     public const string DefaultMaterialId = "dev_grid_gray";
 
+    private string _materialId;
+    private EditableMesh? _cachedMesh;
+    private int _cachedMeshVersion = -1;
+    private int _cachedVertexCount = -1;
+    private Vector3? _cachedLocalNormal;
+    private Vector3? _cachedLocalCentroid;
+    private IReadOnlyList<FaceTriangle>? _cachedTrianglesWithIndices;
+    private IReadOnlyList<(int V0, int V1, int V2)>? _cachedTriangles;
+
+    internal EditableMesh? Owner { get; set; }
+
     public int Id { get; }
     public List<int> VertexIds { get; }
-    public string MaterialId { get; set; }
+
+    public string MaterialId
+    {
+        get => _materialId;
+        set
+        {
+            string normalized = string.IsNullOrWhiteSpace(value) ? DefaultMaterialId : value;
+            if (!string.Equals(_materialId, normalized, StringComparison.Ordinal))
+            {
+                _materialId = normalized;
+                Owner?.InvalidateMaterialGroups();
+            }
+        }
+    }
+
     public FaceUvMapping UvMapping { get; set; }
     public ElementMetadata Metadata { get; set; }
 
@@ -44,9 +92,39 @@ public sealed class PolygonFace
     {
         Id = id;
         VertexIds = new List<int>(vertexIds);
-        MaterialId = string.IsNullOrWhiteSpace(materialId) ? DefaultMaterialId : materialId;
+        _materialId = string.IsNullOrWhiteSpace(materialId) ? DefaultMaterialId : materialId;
         UvMapping = uvMapping ?? new FaceUvMapping();
         Metadata = metadata ?? new ElementMetadata();
+    }
+
+    /// <summary>
+    /// Invalidates cached normal, centroid, and triangulation buffers for this face.
+    /// </summary>
+    public void InvalidateGeometryCache()
+    {
+        _cachedMesh = null;
+        _cachedMeshVersion = -1;
+        _cachedVertexCount = -1;
+        _cachedLocalNormal = null;
+        _cachedLocalCentroid = null;
+        _cachedTrianglesWithIndices = null;
+        _cachedTriangles = null;
+    }
+
+    private void EnsureGeometryCacheValid(EditableMesh mesh)
+    {
+        if (!ReferenceEquals(_cachedMesh, mesh) ||
+            _cachedMeshVersion != mesh.Version ||
+            _cachedVertexCount != VertexIds.Count)
+        {
+            _cachedMesh = mesh;
+            _cachedMeshVersion = mesh.Version;
+            _cachedVertexCount = VertexIds.Count;
+            _cachedLocalNormal = null;
+            _cachedLocalCentroid = null;
+            _cachedTrianglesWithIndices = null;
+            _cachedTriangles = null;
+        }
     }
 
     /// <summary>
@@ -54,6 +132,20 @@ public sealed class PolygonFace
     /// for both convex and concave planar or near-planar N-gons.
     /// </summary>
     public Vector3 ComputeNormal(EditableMesh mesh)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+        EnsureGeometryCacheValid(mesh);
+        if (_cachedLocalNormal.HasValue)
+        {
+            return _cachedLocalNormal.Value;
+        }
+
+        Vector3 normal = ComputeNormalUncached(mesh);
+        _cachedLocalNormal = normal;
+        return normal;
+    }
+
+    private Vector3 ComputeNormalUncached(EditableMesh mesh)
     {
         int count = VertexIds.Count;
         if (count < 3)
@@ -93,6 +185,20 @@ public sealed class PolygonFace
     /// </summary>
     public Vector3 ComputeCentroid(EditableMesh mesh)
     {
+        ArgumentNullException.ThrowIfNull(mesh);
+        EnsureGeometryCacheValid(mesh);
+        if (_cachedLocalCentroid.HasValue)
+        {
+            return _cachedLocalCentroid.Value;
+        }
+
+        Vector3 centroid = ComputeCentroidUncached(mesh);
+        _cachedLocalCentroid = centroid;
+        return centroid;
+    }
+
+    private Vector3 ComputeCentroidUncached(EditableMesh mesh)
+    {
         int count = VertexIds.Count;
         if (count == 0)
         {
@@ -115,9 +221,49 @@ public sealed class PolygonFace
         return validCount > 0 ? sum / validCount : Vector3.Zero;
     }
 
+    /// <summary>
+    /// Gets or computes the cached triangulation of this face, including both mesh vertex IDs and 0-based face loop indices.
+    /// </summary>
+    public IReadOnlyList<FaceTriangle> GetTrianglesWithLocalIndices(EditableMesh mesh)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+        EnsureGeometryCacheValid(mesh);
+        return _cachedTrianglesWithIndices ??= PolygonTriangulator.ComputeFaceTrianglesWithIndices(this, mesh);
+    }
+
+    /// <summary>
+    /// Gets or computes the cached triangulation of this face as vertex ID triplets <c>(V0, V1, V2)</c>.
+    /// </summary>
+    public IReadOnlyList<(int V0, int V1, int V2)> GetTriangles(EditableMesh mesh)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+        EnsureGeometryCacheValid(mesh);
+        if (_cachedTriangles is not null)
+        {
+            return _cachedTriangles;
+        }
+
+        IReadOnlyList<FaceTriangle> trisWithIndices = GetTrianglesWithLocalIndices(mesh);
+        if (trisWithIndices.Count == 0)
+        {
+            _cachedTriangles = [];
+            return _cachedTriangles;
+        }
+
+        var tris = new (int V0, int V1, int V2)[trisWithIndices.Count];
+        for (int i = 0; i < trisWithIndices.Count; i++)
+        {
+            FaceTriangle ft = trisWithIndices[i];
+            tris[i] = (ft.V0, ft.V1, ft.V2);
+        }
+
+        _cachedTriangles = tris;
+        return _cachedTriangles;
+    }
+
     public PolygonFace Clone()
     {
-        return new PolygonFace(Id, VertexIds, MaterialId, UvMapping.Clone(), Metadata.Clone());
+        return new PolygonFace(Id, VertexIds, _materialId, UvMapping.Clone(), Metadata.Clone());
     }
 }
 
@@ -136,6 +282,13 @@ public sealed class EditableMesh
     private int _nextVertexId = 1;
     private int _nextFaceId = 1;
     private TopologyGraph? _cachedTopology;
+    private BoundingBox3D? _cachedBounds;
+    private IReadOnlyList<(string MaterialId, IReadOnlyList<PolygonFace> Faces)>? _cachedFacesByMaterial;
+
+    /// <summary>
+    /// Monotonically increasing version counter incremented whenever vertices, faces, or topology change.
+    /// </summary>
+    public int Version { get; private set; } = 1;
 
     public IReadOnlyList<MeshVertex> Vertices => _vertices;
     public IReadOnlyList<PolygonFace> Faces => _faces;
@@ -143,6 +296,55 @@ public sealed class EditableMesh
 
     public int VertexCount => _vertices.Count;
     public int FaceCount => _faces.Count;
+
+    internal void OnVertexPositionChanged()
+    {
+        _cachedBounds = null;
+        Version++;
+    }
+
+    internal void InvalidateMaterialGroups()
+    {
+        _cachedFacesByMaterial = null;
+        Version++;
+    }
+
+    /// <summary>
+    /// Returns faces grouped by material ID, caching the grouping until faces or face materials change.
+    /// </summary>
+    public IReadOnlyList<(string MaterialId, IReadOnlyList<PolygonFace> Faces)> GetFacesByMaterial()
+    {
+        if (_cachedFacesByMaterial is not null)
+        {
+            return _cachedFacesByMaterial;
+        }
+
+        var map = new Dictionary<string, List<PolygonFace>>(StringComparer.OrdinalIgnoreCase);
+        var order = new List<string>();
+
+        for (int i = 0; i < _faces.Count; i++)
+        {
+            PolygonFace face = _faces[i];
+            string matId = string.IsNullOrWhiteSpace(face.MaterialId) ? PolygonFace.DefaultMaterialId : face.MaterialId;
+            if (!map.TryGetValue(matId, out List<PolygonFace>? list))
+            {
+                list = [];
+                map[matId] = list;
+                order.Add(matId);
+            }
+            list.Add(face);
+        }
+
+        var groups = new (string MaterialId, IReadOnlyList<PolygonFace> Faces)[order.Count];
+        for (int i = 0; i < order.Count; i++)
+        {
+            string key = order[i];
+            groups[i] = (key, map[key]);
+        }
+
+        _cachedFacesByMaterial = groups;
+        return _cachedFacesByMaterial;
+    }
 
     /// <summary>
     /// Gets or creates the <see cref="ElementMetadata"/> for the given edge.
@@ -183,7 +385,7 @@ public sealed class EditableMesh
             _nextVertexId = id + 1;
         }
 
-        var vertex = new MeshVertex(id, position, metadata);
+        var vertex = new MeshVertex(id, position, metadata) { Owner = this };
         _verticesById[id] = vertex;
         _vertices.Add(vertex);
         InvalidateTopology();
@@ -222,7 +424,7 @@ public sealed class EditableMesh
             _nextFaceId = id + 1;
         }
 
-        var face = new PolygonFace(id, vertexIds, materialId, uvMapping?.Clone(), metadata?.Clone());
+        var face = new PolygonFace(id, vertexIds, materialId, uvMapping?.Clone(), metadata?.Clone()) { Owner = this };
         if (uvMapping is null || !uvMapping.TextureLock)
         {
             Vector3 normal = face.ComputeNormal(this);
@@ -273,6 +475,7 @@ public sealed class EditableMesh
             return false;
         }
 
+        face.Owner = null;
         _faces.Remove(face);
         InvalidateTopology();
         return true;
@@ -285,6 +488,7 @@ public sealed class EditableMesh
             return false;
         }
 
+        vertex.Owner = null;
         _vertices.Remove(vertex);
         InvalidateTopology();
         return true;
@@ -298,12 +502,14 @@ public sealed class EditableMesh
         var copy = new EditableMesh
         {
             _nextVertexId = _nextVertexId,
-            _nextFaceId = _nextFaceId
+            _nextFaceId = _nextFaceId,
+            Version = Version
         };
 
         for (int i = 0; i < _vertices.Count; i++)
         {
             MeshVertex clonedVert = _vertices[i].Clone();
+            clonedVert.Owner = copy;
             copy._vertices.Add(clonedVert);
             copy._verticesById[clonedVert.Id] = clonedVert;
         }
@@ -311,6 +517,7 @@ public sealed class EditableMesh
         for (int i = 0; i < _faces.Count; i++)
         {
             PolygonFace clonedFace = _faces[i].Clone();
+            clonedFace.Owner = copy;
             copy._faces.Add(clonedFace);
             copy._facesById[clonedFace.Id] = clonedFace;
         }
@@ -463,9 +670,16 @@ public sealed class EditableMesh
     /// </summary>
     public BoundingBox3D ComputeBoundingBox()
     {
+        if (_cachedBounds.HasValue)
+        {
+            return _cachedBounds.Value;
+        }
+
         if (_vertices.Count == 0)
         {
-            return new BoundingBox3D(Vector3.Zero, Vector3.Zero);
+            var empty = new BoundingBox3D(Vector3.Zero, Vector3.Zero);
+            _cachedBounds = empty;
+            return empty;
         }
 
         Vector3 min = _vertices[0].Position;
@@ -478,7 +692,9 @@ public sealed class EditableMesh
             max = Vector3.Max(max, p);
         }
 
-        return new BoundingBox3D(min, max);
+        var bounds = new BoundingBox3D(min, max);
+        _cachedBounds = bounds;
+        return bounds;
     }
 
     /// <summary>
@@ -490,10 +706,13 @@ public sealed class EditableMesh
     }
 
     /// <summary>
-    /// Explicitly invalidates the cached <see cref="TopologyGraph"/> after external face mutations.
+    /// Explicitly invalidates the cached <see cref="TopologyGraph"/> and face geometry caches after external face mutations.
     /// </summary>
     public void InvalidateTopology()
     {
         _cachedTopology = null;
+        _cachedBounds = null;
+        _cachedFacesByMaterial = null;
+        Version++;
     }
 }

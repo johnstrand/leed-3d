@@ -315,22 +315,11 @@ public sealed class ViewportRenderer : IDisposable
 
         if (drawSolid)
         {
-            // Group faces by material to batch textured draw calls
-            var facesByMaterial = new Dictionary<string, List<PolygonFace>>(StringComparer.OrdinalIgnoreCase);
-            for (int fIdx = 0; fIdx < mesh.Faces.Count; fIdx++)
-            {
-                PolygonFace face = mesh.Faces[fIdx];
-                string matId = string.IsNullOrWhiteSpace(face.MaterialId) ? PolygonFace.DefaultMaterialId : face.MaterialId;
-                if (!facesByMaterial.TryGetValue(matId, out List<PolygonFace>? list))
-                {
-                    list = [];
-                    facesByMaterial[matId] = list;
-                }
-                list.Add(face);
-            }
+            IReadOnlyList<(string MaterialId, IReadOnlyList<PolygonFace> Faces)> facesByMaterial = mesh.GetFacesByMaterial();
 
-            foreach (var (matId, faces) in facesByMaterial)
+            for (int grpIdx = 0; grpIdx < facesByMaterial.Count; grpIdx++)
             {
+                (string matId, IReadOnlyList<PolygonFace> faces) = facesByMaterial[grpIdx];
                 Texture2D texture = default;
                 bool hasTexture = textureCache != null && Raylib.IsWindowReady();
                 if (hasTexture)
@@ -383,7 +372,7 @@ public sealed class ViewportRenderer : IDisposable
                     }
 
                     IReadOnlyList<Vector2> faceUvs = UvProjectionEngine.ComputeFaceUvs(face, mesh, obj.Transform);
-                    IReadOnlyList<(int V0, int V1, int V2)> tris = PolygonTriangulator.TriangulateFace(face, mesh);
+                    IReadOnlyList<FaceTriangle> tris = face.GetTrianglesWithLocalIndices(mesh);
 
                     for (int tIdx = 0; tIdx < tris.Count; tIdx++)
                     {
@@ -392,11 +381,13 @@ public sealed class ViewportRenderer : IDisposable
                             Rlgl.Begin(DrawMode.Triangles);
                         }
 
-                        var (v0Id, v1Id, v2Id) = tris[tIdx];
-                        // Find local vertex loop indices for UVs
-                        int idx0 = face.VertexIds.IndexOf(v0Id);
-                        int idx1 = face.VertexIds.IndexOf(v1Id);
-                        int idx2 = face.VertexIds.IndexOf(v2Id);
+                        FaceTriangle tri = tris[tIdx];
+                        int v0Id = tri.V0;
+                        int v1Id = tri.V1;
+                        int v2Id = tri.V2;
+                        int idx0 = tri.I0;
+                        int idx1 = tri.I1;
+                        int idx2 = tri.I2;
 
                         Vector2 uv0 = idx0 >= 0 && idx0 < faceUvs.Count ? faceUvs[idx0] : Vector2.Zero;
                         Vector2 uv1 = idx1 >= 0 && idx1 < faceUvs.Count ? faceUvs[idx1] : Vector2.Zero;
