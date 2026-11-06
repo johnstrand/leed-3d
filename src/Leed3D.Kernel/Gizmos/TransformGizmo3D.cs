@@ -1,5 +1,7 @@
 using System.Numerics;
 using Leed3D.Kernel.Math;
+using Leed3D.Kernel.Scene;
+using Leed3D.Kernel.Selection;
 using Leed3D.Kernel.Viewport;
 
 namespace Leed3D.Kernel.Gizmos;
@@ -194,7 +196,11 @@ public sealed class TransformGizmo3D
         bool snapGrid = false,
         float gridStep = 1.0f,
         bool snapAngle = false,
-        float angleStepDegrees = 15.0f)
+        float angleStepDegrees = 15.0f,
+        SnapTargetMode snapTargetMode = SnapTargetMode.Grid,
+        EditorScene? scene = null,
+        SelectionManager? selection = null,
+        float maxSnapDistanceWorld = 2.0f)
     {
         if (!IsDragging || ActiveConstraint == GizmoAxisConstraint.None)
         {
@@ -206,7 +212,21 @@ public sealed class TransformGizmo3D
         switch (ActiveDragMode)
         {
             case GizmoToolMode.Translate:
-                UpdateTranslateDrag(currentWorldRay, snapGrid, gridStep);
+                bool useGridSnap = snapGrid && snapTargetMode == SnapTargetMode.Grid;
+                UpdateTranslateDrag(currentWorldRay, useGridSnap, gridStep);
+                if (snapGrid && snapTargetMode != SnapTargetMode.Grid && scene is not null &&
+                    SceneSnapQuery.TryFindSnapTarget(
+                        scene,
+                        selection,
+                        snapTargetMode,
+                        DragPivotWorld + CurrentTranslationDelta,
+                        currentWorldRay,
+                        maxSnapDistanceWorld,
+                        out SnapTargetHit snapHit))
+                {
+                    ActiveSnapHit = snapHit;
+                    CurrentTranslationDelta = SceneSnapQuery.ComputeConstrainedSnapDelta(DragPivotWorld, snapHit.WorldPosition, ActiveConstraint);
+                }
                 break;
 
             case GizmoToolMode.Rotate:
@@ -219,6 +239,8 @@ public sealed class TransformGizmo3D
         }
     }
 
+    public SnapTargetHit? ActiveSnapHit { get; private set; }
+
     /// <summary>
     /// Completes the active drag session.
     /// </summary>
@@ -226,6 +248,7 @@ public sealed class TransformGizmo3D
     {
         IsDragging = false;
         ActiveConstraint = GizmoAxisConstraint.None;
+        ActiveSnapHit = null;
     }
 
     /// <summary>
@@ -245,6 +268,7 @@ public sealed class TransformGizmo3D
         CurrentAngleDegrees = 0.0f;
         CurrentRotationQuaternion = Quaternion.Identity;
         CurrentScaleMultiplier = Vector3.One;
+        ActiveSnapHit = null;
     }
 
     private GizmoToolMode ResolveUniversalSubMode(GizmoAxisConstraint constraint)

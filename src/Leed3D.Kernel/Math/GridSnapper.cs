@@ -3,6 +3,17 @@ using System.Numerics;
 namespace Leed3D.Kernel.Math;
 
 /// <summary>
+/// Target element mode for snapping during gizmo and modal transforms.
+/// </summary>
+public enum SnapTargetMode
+{
+    Grid,
+    Vertex,
+    Edge,
+    Face
+}
+
+/// <summary>
 /// Utility for power-of-two grid and angle snapping.
 /// </summary>
 public static class GridSnapper

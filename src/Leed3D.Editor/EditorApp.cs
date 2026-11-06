@@ -295,6 +295,7 @@ public sealed class EditorApp : IDisposable
 
     public bool SnapToGridEnabled { get; set; } = true;
     public float CurrentGridStep { get; set; } = 1.0f;
+    public SnapTargetMode CurrentSnapTargetMode { get; set; } = SnapTargetMode.Grid;
     public bool SnapAngleEnabled { get; set; } = true;
     public float CurrentAngleStepDegrees { get; set; } = 15.0f;
 
@@ -991,6 +992,9 @@ public sealed class EditorApp : IDisposable
             DrawVertexSelectionOverlay(new Vector2(targetW, targetH));
         }
 
+        // Active Snap Target visual indicator overlay during Gizmo or Modal transforms
+        DrawSnapTargetOverlay(new Vector2(targetW, targetH));
+
         // Marquee drag selection box overlay
         if (_isDraggingMarquee)
         {
@@ -1256,14 +1260,28 @@ public sealed class EditorApp : IDisposable
             ImGui.PopStyleColor();
         }
 
-        // 2. Grid Snap Selector
+        // 2. Grid / Element Snap Selector
         ImGui.SameLine();
         ImGui.TextDisabled("|");
         ImGui.SameLine();
         bool snapGrid = SnapToGridEnabled;
-        if (ImGui.Checkbox("Grid Snap", ref snapGrid))
+        if (ImGui.Checkbox("Snap", ref snapGrid))
         {
             SnapToGridEnabled = snapGrid;
+        }
+
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(75.0f);
+        if (ImGui.BeginCombo("##SnapTargetModeCombo", CurrentSnapTargetMode.ToString()))
+        {
+            foreach (SnapTargetMode snapMode in Enum.GetValues<SnapTargetMode>())
+            {
+                if (ImGui.Selectable(snapMode.ToString(), CurrentSnapTargetMode == snapMode))
+                {
+                    CurrentSnapTargetMode = snapMode;
+                }
+            }
+            ImGui.EndCombo();
         }
 
         ImGui.SameLine();
@@ -1740,6 +1758,37 @@ public sealed class EditorApp : IDisposable
         drawList.PopClipRect();
     }
 
+    private void DrawSnapTargetOverlay(Vector2 viewportSize)
+    {
+        SnapTargetHit? snapHit = ModalController.ActiveSnapHit ?? Gizmo.ActiveSnapHit;
+        if (!snapHit.HasValue)
+        {
+            return;
+        }
+
+        Vector2? screenPt = Camera.WorldToScreenPoint(snapHit.Value.WorldPosition, viewportSize);
+        if (!screenPt.HasValue)
+        {
+            return;
+        }
+
+        ImDrawListPtr drawList = ImGui.GetWindowDrawList();
+        drawList.PushClipRect(_viewportScreenMin, _viewportScreenMin + viewportSize, true);
+
+        Vector2 pt = _viewportScreenMin + screenPt.Value;
+        uint snapColor = ImGui.GetColorU32(new Vector4(0.20f, 1.00f, 0.55f, 1.00f));
+        drawList.AddCircle(pt, 7.0f, snapColor, 16, 2.0f);
+        drawList.AddLine(pt - new Vector2(10, 0), pt + new Vector2(10, 0), snapColor, 1.5f);
+        drawList.AddLine(pt - new Vector2(0, 10), pt + new Vector2(0, 10), snapColor, 1.5f);
+
+        string tag = snapHit.Value.Mode == SnapTargetMode.Edge && snapHit.Value.IsEdgeMidpoint
+            ? "Midpoint"
+            : snapHit.Value.Mode.ToString();
+        drawList.AddText(pt + new Vector2(10, -8), snapColor, tag);
+
+        drawList.PopClipRect();
+    }
+
     private void UpdateViewportSelectionInput(Vector2 viewportSize)
     {
         // Active Interactive Edit Controller Drag Handling (Extrude / Inset)
@@ -1809,7 +1858,14 @@ public sealed class EditorApp : IDisposable
             bool snapGrid = ctrlHeld ? !SnapToGridEnabled : SnapToGridEnabled;
             bool snapAngle = ctrlHeld ? !SnapAngleEnabled : SnapAngleEnabled;
 
-            ModalController.UpdateRay(Scene, currentRay, snapGrid, CurrentGridStep, snapAngle, CurrentAngleStepDegrees);
+            ModalController.UpdateRay(
+                Scene,
+                currentRay,
+                snapGrid,
+                CurrentGridStep,
+                snapAngle,
+                CurrentAngleStepDegrees,
+                CurrentSnapTargetMode);
             _statusMessage = ModalController.GetStatusReadout();
             return;
         }
@@ -1832,7 +1888,15 @@ public sealed class EditorApp : IDisposable
                 bool snapGrid = ctrlHeld ? !SnapToGridEnabled : SnapToGridEnabled;
                 bool snapAngle = ctrlHeld ? !SnapAngleEnabled : SnapAngleEnabled;
 
-                Gizmo.UpdateDrag(dragRay, snapGrid, CurrentGridStep, snapAngle, CurrentAngleStepDegrees);
+                Gizmo.UpdateDrag(
+                    dragRay,
+                    snapGrid,
+                    CurrentGridStep,
+                    snapAngle,
+                    CurrentAngleStepDegrees,
+                    CurrentSnapTargetMode,
+                    Scene,
+                    Selection);
                 Applicator.ApplyGizmo(Scene, Gizmo);
 
                 _statusMessage = Gizmo.ActiveDragMode switch

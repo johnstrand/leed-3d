@@ -63,6 +63,9 @@ public sealed class ModalTransformController
     public float CurrentAngleDegrees { get; private set; }
     public Quaternion CurrentRotationQuaternion { get; private set; } = Quaternion.Identity;
     public Vector3 CurrentScaleMultiplier { get; private set; } = Vector3.One;
+    public SnapTargetHit? ActiveSnapHit { get; private set; }
+
+    private SelectionManager? _activeSelection;
 
     public TransformApplicator Applicator { get; } = new();
 
@@ -98,6 +101,7 @@ public sealed class ModalTransformController
         InitialRay = initialRay;
         LastRay = initialRay;
         CameraForward = cameraForward.LengthSquared() > Epsilon ? Vector3.Normalize(cameraForward) : Vector3.UnitZ;
+        _activeSelection = selection;
 
         ClearNumericInput();
         ResetDeltas();
@@ -254,7 +258,9 @@ public sealed class ModalTransformController
         bool snapGrid = false,
         float gridStep = 1.0f,
         bool snapAngle = false,
-        float angleStepDegrees = 15.0f)
+        float angleStepDegrees = 15.0f,
+        SnapTargetMode snapTargetMode = SnapTargetMode.Grid,
+        float maxSnapDistanceWorld = 2.0f)
     {
         ArgumentNullException.ThrowIfNull(scene);
 
@@ -277,7 +283,21 @@ public sealed class ModalTransformController
         switch (Mode)
         {
             case ModalTransformMode.Move:
-                CalculateMoveRayDelta(currentRay, snapGrid, gridStep);
+                bool useGridSnap = snapGrid && snapTargetMode == SnapTargetMode.Grid;
+                CalculateMoveRayDelta(currentRay, useGridSnap, gridStep);
+                if (snapGrid && snapTargetMode != SnapTargetMode.Grid &&
+                    SceneSnapQuery.TryFindSnapTarget(
+                        scene,
+                        _activeSelection,
+                        snapTargetMode,
+                        PivotWorld + CurrentTranslationDelta,
+                        currentRay,
+                        maxSnapDistanceWorld,
+                        out SnapTargetHit snapHit))
+                {
+                    ActiveSnapHit = snapHit;
+                    CurrentTranslationDelta = SceneSnapQuery.ComputeConstrainedSnapDelta(PivotWorld, snapHit.WorldPosition, Constraint);
+                }
                 Applicator.ApplyTranslation(scene, CurrentTranslationDelta);
                 break;
 
@@ -643,6 +663,7 @@ public sealed class ModalTransformController
         CurrentAngleDegrees = 0.0f;
         CurrentRotationQuaternion = Quaternion.Identity;
         CurrentScaleMultiplier = Vector3.One;
+        ActiveSnapHit = null;
     }
 
     private void EndSessionInternal()
@@ -650,6 +671,7 @@ public sealed class ModalTransformController
         IsActive = false;
         Mode = ModalTransformMode.None;
         Constraint = GizmoAxisConstraint.None;
+        _activeSelection = null;
         ClearNumericInput();
         ResetDeltas();
     }
