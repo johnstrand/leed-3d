@@ -663,6 +663,37 @@ public sealed class EditorApp : IDisposable
                 ExecuteCsgCarve();
             }
 
+            ImGui.Separator();
+            if (ImGui.MenuItem("Join Selected Objects", "Ctrl+J", false, Selection.Mode == InteractionMode.Object && Selection.SelectedObjectIds.Count >= 2))
+            {
+                EditController.ExecuteJoinObjects(Scene, Selection, UndoStack);
+                _statusMessage = EditController.LastOperationMessage ?? "Joined selected objects.";
+            }
+            if (ImGui.MenuItem("Separate Selected Faces", "P", false, Selection.Mode == InteractionMode.Face && Selection.SelectedFaceIds.Count > 0))
+            {
+                EditController.ExecuteSeparateFaces(Scene, Selection, UndoStack);
+                _statusMessage = EditController.LastOperationMessage ?? "Separated selected faces.";
+            }
+            if (ImGui.MenuItem("Apply Rotation & Scale", "Ctrl+A", false, Selection.Mode == InteractionMode.Object && Selection.SelectedObjectIds.Count > 0))
+            {
+                EditController.ExecuteApplyTransform(Scene, Selection, UndoStack);
+                _statusMessage = EditController.LastOperationMessage ?? "Applied transform.";
+            }
+            if (ImGui.MenuItem("Set Origin to Bounds Center", "", false, Selection.SelectedObjectIds.Count > 0))
+            {
+                if (EditController.ExecuteSetOriginToBoundsCenter(Scene, Selection, UndoStack))
+                {
+                    _statusMessage = EditController.LastOperationMessage ?? "Moved origin to bounds center.";
+                }
+            }
+            if (ImGui.MenuItem("Set Origin to Bottom Center", "", false, Selection.SelectedObjectIds.Count > 0))
+            {
+                if (EditController.ExecuteSetOriginToBottomCenter(Scene, Selection, UndoStack))
+                {
+                    _statusMessage = EditController.LastOperationMessage ?? "Moved origin to bottom center.";
+                }
+            }
+
             ImGui.EndMenu();
         }
 

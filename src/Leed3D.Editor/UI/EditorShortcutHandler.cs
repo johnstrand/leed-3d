@@ -516,15 +516,39 @@ public sealed class EditorShortcutHandler
                     OpenLoopCutPopupRequested = true;
                     return;
                 }
+
+                // P: Separate selected faces into a new object
+                if (!ctrl && !shift && !alt && _app.Selection.Mode == InteractionMode.Face && Raylib.IsKeyPressed(KeyboardKey.P))
+                {
+                    _app.EditController.ExecuteSeparateFaces(_app.Scene, _app.Selection, _app.UndoStack);
+                    _app.StatusMessage = _app.EditController.LastOperationMessage ?? "Separated selected faces.";
+                    return;
+                }
             }
 
-            // CSG Boolean Hotkeys (in Object Mode):
+            // CSG Boolean & Object Organization Hotkeys (in Object Mode):
+            // Ctrl+J : Join Objects
+            // Ctrl+A : Apply / Freeze Rotation & Scale
             // Ctrl+= : Union
             // Ctrl+- : Subtract / Carve
             // Ctrl+8 : Intersect
             // Ctrl+Shift+C : TrenchBroom Carve
             if (_app.Selection.Mode == InteractionMode.Object)
             {
+                if (ctrl && !shift && !alt && Raylib.IsKeyPressed(KeyboardKey.J))
+                {
+                    _app.EditController.ExecuteJoinObjects(_app.Scene, _app.Selection, _app.UndoStack);
+                    _app.StatusMessage = _app.EditController.LastOperationMessage ?? "Joined selected objects.";
+                    return;
+                }
+
+                if (ctrl && !shift && !alt && Raylib.IsKeyPressed(KeyboardKey.A))
+                {
+                    _app.EditController.ExecuteApplyTransform(_app.Scene, _app.Selection, _app.UndoStack);
+                    _app.StatusMessage = _app.EditController.LastOperationMessage ?? "Applied transform.";
+                    return;
+                }
+
                 if (ctrl && shift && Raylib.IsKeyPressed(KeyboardKey.C))
                 {
                     _app.ExecuteCsgCarve();

@@ -2,6 +2,7 @@ using System.Numerics;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Scene;
 using Leed3D.Kernel.Selection;
+using Leed3D.Kernel.Texturing;
 
 namespace Leed3D.Kernel.Modifiers;
 
@@ -697,6 +698,275 @@ public static class MeshModifiers
 
         return created;
     }
+
+    /// <summary>
+    /// Joins multiple <see cref="SceneObject"/>s into a single mesh on the active (or first) target object,
+    /// transforming source vertex positions into the target object's local coordinate space while preserving
+    /// world-space UVs, materials, and element metadata. Removes the merged source objects from <paramref name="scene"/>.
+    /// </summary>
+    public static SceneObject? JoinObjects(
+        EditorScene scene,
+        IReadOnlyCollection<int> objectIds,
+        SelectionManager? selection = null)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        ArgumentNullException.ThrowIfNull(objectIds);
+
+        var validObjects = new List<SceneObject>();
+        var seenIds = new HashSet<int>();
+        foreach (int id in objectIds)
+        {
+            if (seenIds.Add(id) && scene.GetObject(id) is { Locked: false, Mesh: not null } obj)
+            {
+                validObjects.Add(obj);
+            }
+        }
+
+        if (validObjects.Count < 2)
+        {
+            return null;
+        }
+
+        SceneObject targetObj = validObjects[0];
+        if (selection?.ActiveObjectId is int activeId)
+        {
+            SceneObject? match = validObjects.FirstOrDefault(o => o.Id == activeId);
+            if (match is not null)
+            {
+                targetObj = match;
+            }
+        }
+
+        EditableMesh targetMesh = targetObj.Mesh!;
+        Matrix4x4 targetInverse = targetObj.Transform.GetInverseLocalMatrix();
+
+        for (int i = 0; i < validObjects.Count; i++)
+        {
+            SceneObject srcObj = validObjects[i];
+            if (srcObj.Id == targetObj.Id)
+            {
+                continue;
+            }
+
+            EditableMesh srcMesh = srcObj.Mesh!;
+            Matrix4x4 srcToWorld = srcObj.Transform.GetLocalMatrix();
+            Matrix4x4 srcToTargetLocal = srcToWorld * targetInverse;
+            bool flipWinding = srcToTargetLocal.GetDeterminant() < 0.0f;
+
+            var oldToNewVert = new Dictionary<int, int>(srcMesh.Vertices.Count);
+            for (int v = 0; v < srcMesh.Vertices.Count; v++)
+            {
+                MeshVertex srcVert = srcMesh.Vertices[v];
+                Vector3 worldPos = Vector3.Transform(srcVert.Position, srcToWorld);
+                Vector3 targetLocalPos = Vector3.Transform(worldPos, targetInverse);
+                int newVId = targetMesh.AddVertex(targetLocalPos);
+                oldToNewVert[srcVert.Id] = newVId;
+
+                if (targetMesh.GetVertex(newVId) is { } dstVert &&
+                    (srcVert.Metadata.Properties.Count > 0 || srcVert.Metadata.Tags.Count > 0))
+                {
+                    dstVert.Metadata = srcVert.Metadata.Clone();
+                }
+            }
+
+            for (int f = 0; f < srcMesh.Faces.Count; f++)
+            {
+                PolygonFace srcFace = srcMesh.Faces[f];
+                if (srcFace.VertexIds.Count < 3)
+                {
+                    continue;
+                }
+
+                var newLoop = new List<int>(srcFace.VertexIds.Count);
+                for (int k = 0; k < srcFace.VertexIds.Count; k++)
+                {
+                    if (oldToNewVert.TryGetValue(srcFace.VertexIds[k], out int mappedVId))
+                    {
+                        newLoop.Add(mappedVId);
+                    }
+                }
+
+                if (newLoop.Count < 3)
+                {
+                    continue;
+                }
+
+                if (flipWinding)
+                {
+                    newLoop.Reverse();
+                }
+
+                FaceUvMapping clonedUv = srcFace.UvMapping.Clone();
+                int newFId = targetMesh.AddFace(newLoop, srcFace.MaterialId, clonedUv);
+                if (targetMesh.GetFace(newFId) is { } dstFace)
+                {
+                    if (srcFace.Metadata.Properties.Count > 0 || srcFace.Metadata.Tags.Count > 0)
+                    {
+                        dstFace.Metadata = srcFace.Metadata.Clone();
+                    }
+
+                    if (!dstFace.UvMapping.TextureLock)
+                    {
+                        UvProjectionEngine.RefreshUnlockedFaceAxes(dstFace, targetMesh, targetObj.Transform);
+                    }
+                }
+            }
+
+            foreach (var (edge, meta) in srcMesh.EdgeMetadata)
+            {
+                if (oldToNewVert.TryGetValue(edge.VMin, out int nMin) &&
+                    oldToNewVert.TryGetValue(edge.VMax, out int nMax) &&
+                    nMin != nMax)
+                {
+                    targetMesh.GetOrCreateEdgeMetadata(new EdgeKey(nMin, nMax)).MergeFrom(meta);
+                }
+            }
+
+            scene.RemoveObject(srcObj.Id);
+        }
+
+        targetMesh.ValidateAndRepair();
+        selection?.SelectSingleObject(targetObj.Id);
+        return targetObj;
+    }
+
+    /// <summary>
+    /// Extracts the specified <paramref name="faceIds"/> from <paramref name="sourceObjectId"/> into a newly
+    /// created <see cref="SceneObject"/> with an identical world transform, removing the separated faces from
+    /// the source mesh and running <see cref="EditableMesh.ValidateAndRepair"/> on both meshes.
+    /// </summary>
+    public static SceneObject? SeparateFaces(
+        EditorScene scene,
+        int sourceObjectId,
+        IReadOnlyCollection<int> faceIds,
+        SelectionManager? selection = null)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        ArgumentNullException.ThrowIfNull(faceIds);
+
+        if (faceIds.Count == 0)
+        {
+            return null;
+        }
+
+        SceneObject? sourceObj = scene.GetObject(sourceObjectId);
+        if (sourceObj?.Mesh is null || sourceObj.Locked)
+        {
+            return null;
+        }
+
+        EditableMesh sourceMesh = sourceObj.Mesh;
+        var targetFaces = new List<PolygonFace>();
+        var seenFaces = new HashSet<int>();
+
+        foreach (int fid in faceIds)
+        {
+            if (seenFaces.Add(fid) && sourceMesh.GetFace(fid) is { } face && face.VertexIds.Count >= 3)
+            {
+                targetFaces.Add(face);
+            }
+        }
+
+        if (targetFaces.Count == 0 || targetFaces.Count >= sourceMesh.FaceCount)
+        {
+            return null;
+        }
+
+        var separatedMesh = new EditableMesh();
+        var oldToNewVert = new Dictionary<int, int>();
+
+        for (int i = 0; i < targetFaces.Count; i++)
+        {
+            PolygonFace face = targetFaces[i];
+            var newLoop = new List<int>(face.VertexIds.Count);
+
+            for (int k = 0; k < face.VertexIds.Count; k++)
+            {
+                int oldVId = face.VertexIds[k];
+                if (!oldToNewVert.TryGetValue(oldVId, out int newVId))
+                {
+                    MeshVertex? srcVert = sourceMesh.GetVertex(oldVId);
+                    if (srcVert is null)
+                    {
+                        continue;
+                    }
+
+                    newVId = separatedMesh.AddVertex(srcVert.Position);
+                    oldToNewVert[oldVId] = newVId;
+
+                    if (separatedMesh.GetVertex(newVId) is { } dstVert &&
+                        (srcVert.Metadata.Properties.Count > 0 || srcVert.Metadata.Tags.Count > 0))
+                    {
+                        dstVert.Metadata = srcVert.Metadata.Clone();
+                    }
+                }
+
+                newLoop.Add(newVId);
+            }
+
+            if (newLoop.Count >= 3)
+            {
+                int newFId = separatedMesh.AddFace(newLoop, face.MaterialId, face.UvMapping.Clone());
+                if (separatedMesh.GetFace(newFId) is { } dstFace &&
+                    (face.Metadata.Properties.Count > 0 || face.Metadata.Tags.Count > 0))
+                {
+                    dstFace.Metadata = face.Metadata.Clone();
+                }
+            }
+        }
+
+        foreach (var (edge, meta) in sourceMesh.EdgeMetadata)
+        {
+            if (oldToNewVert.TryGetValue(edge.VMin, out int nMin) &&
+                oldToNewVert.TryGetValue(edge.VMax, out int nMax) &&
+                nMin != nMax)
+            {
+                separatedMesh.GetOrCreateEdgeMetadata(new EdgeKey(nMin, nMax)).MergeFrom(meta);
+            }
+        }
+
+        for (int i = 0; i < targetFaces.Count; i++)
+        {
+            sourceMesh.RemoveFace(targetFaces[i].Id);
+        }
+
+        sourceMesh.ValidateAndRepair();
+        separatedMesh.ValidateAndRepair();
+
+        SceneObject newObj = scene.AddMeshObject($"{sourceObj.Name}_Part", separatedMesh, sourceObj.Transform.Position);
+        newObj.Transform.RotationEulerDegrees = sourceObj.Transform.RotationEulerDegrees;
+        newObj.Transform.Scale = sourceObj.Transform.Scale;
+        if (sourceObj.Metadata.Properties.Count > 0 || sourceObj.Metadata.Tags.Count > 0)
+        {
+            newObj.Metadata = sourceObj.Metadata.Clone();
+        }
+
+        selection?.SanitizeAgainstScene(scene);
+        return newObj;
+    }
+
+    /// <summary>
+    /// Bakes selected components of <paramref name="obj"/>'s transform into its mesh vertex positions
+    /// while preserving world-space vertex positions and UVs.
+    /// </summary>
+    public static bool ApplyTransform(
+        SceneObject obj,
+        bool applyPosition = false,
+        bool applyRotation = true,
+        bool applyScale = true)
+        => ObjectTransformOps.ApplyTransform(obj, applyPosition, applyRotation, applyScale);
+
+    /// <summary>
+    /// Moves <paramref name="obj"/>'s origin/pivot to the center of its local bounding box without moving geometry in world space.
+    /// </summary>
+    public static bool SetOriginToBoundsCenter(SceneObject obj)
+        => ObjectTransformOps.SetOriginToBoundsCenter(obj);
+
+    /// <summary>
+    /// Moves <paramref name="obj"/>'s origin/pivot to the bottom center (<c>Min.Y</c>) of its local bounding box without moving geometry in world space.
+    /// </summary>
+    public static bool SetOriginToBottomCenter(SceneObject obj)
+        => ObjectTransformOps.SetOriginToBottomCenter(obj);
 
     private static float GetAxisCoord(Vector3 v, Axis3D axis) => axis switch
     {

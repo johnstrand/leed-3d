@@ -1337,6 +1337,189 @@ public sealed class InteractiveEditController
 
     #endregion
 
+    #region Object & Face Organization (Join, Separate, Apply Transform, Set Origin)
+
+    /// <summary>
+    /// Joins all currently selected objects in Object Mode into the active object's mesh (<c>Ctrl+J</c>).
+    /// </summary>
+    public bool ExecuteJoinObjects(
+        EditorScene scene,
+        SelectionManager selection,
+        UndoRedoStack? undoStack = null)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        ArgumentNullException.ThrowIfNull(selection);
+
+        if (selection.Mode != InteractionMode.Object || selection.SelectedObjectIds.Count < 2)
+        {
+            LastOperationMessage = "Select at least 2 objects in Object Mode to join (Ctrl+J).";
+            return false;
+        }
+
+        EditorScene before = scene.CloneSnapshot();
+        var ids = selection.OrderedSelectedObjectIds.ToList();
+        SceneObject? merged = MeshModifiers.JoinObjects(scene, ids, selection);
+        if (merged is null)
+        {
+            LastOperationMessage = "Could not join selected objects.";
+            return false;
+        }
+
+        undoStack?.RecordAction($"Join {ids.Count} Objects", before, scene);
+        LastOperationMessage = $"Joined {ids.Count} objects into '{merged.Name}'.";
+        return true;
+    }
+
+    /// <summary>
+    /// Separates the currently selected faces in Face Edit Mode into a new independent <see cref="SceneObject"/> (<c>P</c>).
+    /// </summary>
+    public bool ExecuteSeparateFaces(
+        EditorScene scene,
+        SelectionManager selection,
+        UndoRedoStack? undoStack = null)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        ArgumentNullException.ThrowIfNull(selection);
+
+        if (selection.Mode != InteractionMode.Face || !selection.ActiveObjectId.HasValue || selection.SelectedFaceIds.Count == 0)
+        {
+            LastOperationMessage = "Select one or more faces in Face Edit Mode to separate (P).";
+            return false;
+        }
+
+        EditorScene before = scene.CloneSnapshot();
+        int faceCount = selection.SelectedFaceIds.Count;
+        var faceIds = selection.SelectedFaceIds.ToList();
+        SceneObject? newObj = MeshModifiers.SeparateFaces(scene, selection.ActiveObjectId.Value, faceIds, selection);
+        if (newObj is null)
+        {
+            LastOperationMessage = "Cannot separate all faces of a mesh (or no valid faces selected).";
+            return false;
+        }
+
+        undoStack?.RecordAction($"Separate {faceCount} Face(s)", before, scene);
+        LastOperationMessage = $"Separated {faceCount} face(s) into '{newObj.Name}'.";
+        return true;
+    }
+
+    /// <summary>
+    /// Applies/freezes rotation and scale on all selected objects in Object Mode (<c>Ctrl+A</c>).
+    /// </summary>
+    public bool ExecuteApplyTransform(
+        EditorScene scene,
+        SelectionManager selection,
+        UndoRedoStack? undoStack = null,
+        bool applyPosition = false,
+        bool applyRotation = true,
+        bool applyScale = true)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        ArgumentNullException.ThrowIfNull(selection);
+
+        if (selection.SelectedObjectIds.Count == 0)
+        {
+            LastOperationMessage = "Select at least one object to apply transform (Ctrl+A).";
+            return false;
+        }
+
+        EditorScene before = scene.CloneSnapshot();
+        int modified = 0;
+        foreach (int id in selection.SelectedObjectIds)
+        {
+            if (scene.GetObject(id) is { Locked: false } obj &&
+                ObjectTransformOps.ApplyTransform(obj, applyPosition, applyRotation, applyScale))
+            {
+                modified++;
+            }
+        }
+
+        if (modified == 0)
+        {
+            LastOperationMessage = "Selected object(s) already have identity rotation and scale.";
+            return false;
+        }
+
+        undoStack?.RecordAction("Apply Transform", before, scene);
+        LastOperationMessage = $"Applied transform on {modified} object(s) (Ctrl+A).";
+        return true;
+    }
+
+    /// <summary>
+    /// Moves the origin of all selected objects to their local bounding box center while preserving world geometry.
+    /// </summary>
+    public bool ExecuteSetOriginToBoundsCenter(
+        EditorScene scene,
+        SelectionManager selection,
+        UndoRedoStack? undoStack = null)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        ArgumentNullException.ThrowIfNull(selection);
+
+        if (selection.SelectedObjectIds.Count == 0)
+        {
+            return false;
+        }
+
+        EditorScene before = scene.CloneSnapshot();
+        int modified = 0;
+        foreach (int id in selection.SelectedObjectIds)
+        {
+            if (scene.GetObject(id) is { Locked: false } obj &&
+                ObjectTransformOps.SetOriginToBoundsCenter(obj))
+            {
+                modified++;
+            }
+        }
+
+        if (modified == 0)
+        {
+            return false;
+        }
+
+        undoStack?.RecordAction("Origin to Bounds Center", before, scene);
+        LastOperationMessage = $"Moved origin of {modified} object(s) to bounds center.";
+        return true;
+    }
+
+    /// <summary>
+    /// Moves the origin of all selected objects to their bottom-center (<c>Min.Y</c>) while preserving world geometry.
+    /// </summary>
+    public bool ExecuteSetOriginToBottomCenter(
+        EditorScene scene,
+        SelectionManager selection,
+        UndoRedoStack? undoStack = null)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        ArgumentNullException.ThrowIfNull(selection);
+
+        if (selection.SelectedObjectIds.Count == 0)
+        {
+            return false;
+        }
+
+        EditorScene before = scene.CloneSnapshot();
+        int modified = 0;
+        foreach (int id in selection.SelectedObjectIds)
+        {
+            if (scene.GetObject(id) is { Locked: false } obj &&
+                ObjectTransformOps.SetOriginToBottomCenter(obj))
+            {
+                modified++;
+            }
+        }
+
+        if (modified == 0)
+        {
+            return false;
+        }
+
+        undoStack?.RecordAction("Origin to Bottom Center", before, scene);
+        LastOperationMessage = $"Moved origin of {modified} object(s) to bottom center.";
+        return true;
+    }
+
+    #endregion
+
     #region Numeric Input Handling
 
     public bool HandleNumericKey(char key, EditorScene scene)

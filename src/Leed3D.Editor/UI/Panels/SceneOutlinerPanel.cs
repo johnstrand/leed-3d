@@ -493,6 +493,18 @@ public sealed class SceneOutlinerPanel
             ImGui.SetTooltip("Centers the pivot to the geometric average of vertices without moving geometry in world space.");
         }
 
+        if (ImGui.Button("Origin to Bounds Center", new Vector2(-1, 0)))
+        {
+            if (app.EditController.ExecuteSetOriginToBoundsCenter(app.Scene, app.Selection, app.UndoStack))
+            {
+                app.StatusMessage = app.EditController.LastOperationMessage ?? $"Moved origin of {obj.Name} to bounds center.";
+            }
+        }
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Centers the pivot to the axis-aligned bounding box center without moving geometry in world space.");
+        }
+
         if (ImGui.Button("Origin to Bottom Bounds", new Vector2(-1, 0)))
         {
             EditorScene before = app.Scene.CloneSnapshot();

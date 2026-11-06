@@ -4,6 +4,7 @@ using Leed3D.Kernel.Modifiers;
 using Leed3D.Kernel.Primitives;
 using Leed3D.Kernel.Scene;
 using Leed3D.Kernel.Selection;
+using Leed3D.Kernel.Texturing;
 
 namespace Leed3D.Tests.Modifiers;
 
@@ -332,5 +333,140 @@ public sealed class MeshModifiersTests
         Assert.Equal(90f, created[0].Transform.RotationEulerDegrees.Y, 1);
         Assert.Equal(180f, MathF.Abs(created[1].Transform.RotationEulerDegrees.Y), 1);
         Assert.Equal(-90f, created[2].Transform.RotationEulerDegrees.Y, 1);
+    }
+
+    [Fact]
+    public void JoinObjects_And_SeparateFaces_PreserveWorldVertexPositionsAndUvs()
+    {
+        var scene = new EditorScene("JoinSeparateScene");
+        var selection = new SelectionManager();
+
+        EditableMesh meshA = PrimitiveGenerator.CreateBox(new Vector3(2f, 2f, 2f), materialId: "brick");
+        EditableMesh meshB = PrimitiveGenerator.CreateBox(new Vector3(2f, 4f, 2f), materialId: "stone");
+        foreach (PolygonFace f in meshB.Faces)
+        {
+            f.UvMapping.TextureLock = true;
+            f.UvMapping.Offset = new Vector2(0.25f, -0.5f);
+            f.Metadata.SetProperty("surface", "marble");
+        }
+
+        SceneObject objA = scene.AddMeshObject("BaseBrush", meshA, new Vector3(2f, 1f, -3f));
+        objA.Transform.RotationEulerDegrees = new Vector3(0f, 30f, 0f);
+        SceneObject objB = scene.AddMeshObject("TopBrush", meshB, new Vector3(6f, 3f, 2f));
+        objB.Transform.RotationEulerDegrees = new Vector3(0f, -45f, 0f);
+        objB.Transform.Scale = new Vector3(1.5f, 1f, 2f);
+
+        // Record world positions and UVs of objB's first face before joining
+        PolygonFace origFaceB = meshB.Faces[0];
+        Vector3[] origWorldPositionsB = origFaceB.VertexIds
+            .Select(vid => objB.Transform.TransformPointToWorld(meshB.GetVertex(vid)!.Position))
+            .ToArray();
+        IReadOnlyList<Vector2> origUvsB = UvProjectionEngine.ComputeFaceUvs(origFaceB, meshB, objB.Transform);
+
+        // Select both objects with objA as active target
+        selection.SelectMultipleObjects([objB.Id, objA.Id]);
+        selection.ActiveObjectId = objA.Id;
+
+        SceneObject? joined = MeshModifiers.JoinObjects(scene, [objA.Id, objB.Id], selection);
+        Assert.NotNull(joined);
+        Assert.Equal(objA.Id, joined.Id);
+        Assert.Equal(1, scene.ObjectCount);
+        Assert.Equal(16, joined.Mesh!.VertexCount);
+        Assert.Equal(12, joined.Mesh.FaceCount);
+
+        // Find the joined face corresponding to origFaceB (first stone face)
+        PolygonFace joinedFaceB = joined.Mesh.Faces.First(f => f.MaterialId == "stone");
+        Assert.Equal("marble", joinedFaceB.Metadata.GetSurfaceType());
+        Vector3[] joinedWorldPositionsB = joinedFaceB.VertexIds
+            .Select(vid => joined.Transform.TransformPointToWorld(joined.Mesh.GetVertex(vid)!.Position))
+            .ToArray();
+        IReadOnlyList<Vector2> joinedUvsB = UvProjectionEngine.ComputeFaceUvs(joinedFaceB, joined.Mesh, joined.Transform);
+
+        for (int i = 0; i < origWorldPositionsB.Length; i++)
+        {
+            Assert.True(Vector3.Distance(origWorldPositionsB[i], joinedWorldPositionsB[i]) < 1e-4f);
+            Assert.True(Vector2.Distance(origUvsB[i], joinedUvsB[i]) < 1e-4f);
+        }
+
+        // Now separate all "stone" faces back into an independent SceneObject
+        var stoneFaceIds = joined.Mesh.Faces.Where(f => f.MaterialId == "stone").Select(f => f.Id).ToList();
+        SceneObject? separated = MeshModifiers.SeparateFaces(scene, joined.Id, stoneFaceIds, selection);
+
+        Assert.NotNull(separated);
+        Assert.Equal(2, scene.ObjectCount);
+        Assert.Equal(8, joined.Mesh.VertexCount);
+        Assert.Equal(6, joined.Mesh.FaceCount);
+        Assert.Equal(8, separated.Mesh!.VertexCount);
+        Assert.Equal(6, separated.Mesh.FaceCount);
+
+        PolygonFace sepFaceB = separated.Mesh.Faces[0];
+        Vector3[] sepWorldPositionsB = sepFaceB.VertexIds
+            .Select(vid => separated.Transform.TransformPointToWorld(separated.Mesh.GetVertex(vid)!.Position))
+            .ToArray();
+        IReadOnlyList<Vector2> sepUvsB = UvProjectionEngine.ComputeFaceUvs(sepFaceB, separated.Mesh, separated.Transform);
+
+        for (int i = 0; i < origWorldPositionsB.Length; i++)
+        {
+            Assert.True(Vector3.Distance(origWorldPositionsB[i], sepWorldPositionsB[i]) < 1e-4f);
+            Assert.True(Vector2.Distance(origUvsB[i], sepUvsB[i]) < 1e-4f);
+        }
+    }
+
+    [Fact]
+    public void ApplyTransform_And_SetOrigin_PreserveWorldVertexPositionsAndLockedUvs()
+    {
+        EditableMesh mesh = PrimitiveGenerator.CreateBox(new Vector3(2f, 4f, 6f), materialId: "tile");
+        foreach (MeshVertex v in mesh.Vertices)
+        {
+            v.Position += new Vector3(3f, 5f, -2f);
+        }
+        foreach (PolygonFace f in mesh.Faces)
+        {
+            f.UvMapping.TextureLock = true;
+            f.UvMapping.Offset = new Vector2(0.15f, 0.35f);
+        }
+
+        var obj = new SceneObject(
+            1,
+            "Pillar",
+            mesh,
+            new Transform3D(new Vector3(4f, -2f, 8f), new Vector3(15f, 40f, -10f), new Vector3(1.5f, 2.0f, 0.75f)));
+
+        Vector3[] initialWorldVerts = mesh.Vertices
+            .Select(v => obj.Transform.TransformPointToWorld(v.Position))
+            .ToArray();
+        IReadOnlyList<Vector2> initialFace0Uvs = UvProjectionEngine.ComputeFaceUvs(mesh.Faces[0], mesh, obj.Transform);
+
+        // 1. SetOriginToBoundsCenter
+        Assert.True(MeshModifiers.SetOriginToBoundsCenter(obj));
+        Assert.True(mesh.ComputeBoundingBox().Center.Length() < 1e-4f);
+        for (int i = 0; i < initialWorldVerts.Length; i++)
+        {
+            Assert.True(Vector3.Distance(initialWorldVerts[i], obj.Transform.TransformPointToWorld(mesh.Vertices[i].Position)) < 1e-4f);
+        }
+
+        // 2. SetOriginToBottomCenter
+        Assert.True(MeshModifiers.SetOriginToBottomCenter(obj));
+        Assert.Equal(0.0f, mesh.ComputeBoundingBox().Min.Y, 4);
+        for (int i = 0; i < initialWorldVerts.Length; i++)
+        {
+            Assert.True(Vector3.Distance(initialWorldVerts[i], obj.Transform.TransformPointToWorld(mesh.Vertices[i].Position)) < 1e-4f);
+        }
+
+        // 3. ApplyTransform (freeze rotation & scale)
+        Assert.True(MeshModifiers.ApplyTransform(obj, applyPosition: false, applyRotation: true, applyScale: true));
+        Assert.Equal(Vector3.Zero, obj.Transform.RotationEulerDegrees);
+        Assert.Equal(Vector3.One, obj.Transform.Scale);
+
+        for (int i = 0; i < initialWorldVerts.Length; i++)
+        {
+            Assert.True(Vector3.Distance(initialWorldVerts[i], obj.Transform.TransformPointToWorld(mesh.Vertices[i].Position)) < 1e-4f);
+        }
+
+        IReadOnlyList<Vector2> afterUvs = UvProjectionEngine.ComputeFaceUvs(mesh.Faces[0], mesh, obj.Transform);
+        for (int i = 0; i < initialFace0Uvs.Count; i++)
+        {
+            Assert.True(Vector2.Distance(initialFace0Uvs[i], afterUvs[i]) < 1e-4f);
+        }
     }
 }
