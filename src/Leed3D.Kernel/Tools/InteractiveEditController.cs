@@ -636,6 +636,69 @@ public sealed class InteractiveEditController
     }
 
     /// <summary>
+    /// Bevels / chamfers selected edges on the active mesh by <paramref name="width"/> with <paramref name="segments"/> strips.
+    /// </summary>
+    public bool ExecuteBevelEdges(EditorScene scene, SelectionManager selection, float width, int segments, UndoRedoStack undoStack)
+    {
+        if (!selection.ActiveObjectId.HasValue || selection.SelectedEdges.Count == 0 || width <= 1e-5f)
+        {
+            return false;
+        }
+
+        SceneObject? obj = scene.GetObject(selection.ActiveObjectId.Value);
+        if (obj?.Mesh is null)
+        {
+            return false;
+        }
+
+        EditorScene before = scene.CloneSnapshot();
+        IReadOnlyList<int> createdFaces = MeshTopologyOps.BevelEdges(obj.Mesh, selection.SelectedEdges, width, segments);
+        if (createdFaces.Count > 0)
+        {
+            selection.SetMode(InteractionMode.Face, scene);
+            selection.SelectMultipleFaces(createdFaces);
+            undoStack.RecordAction($"Bevel Edges (w={width:0.###}, segs={segments})", before, scene);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Inserts an edge loop across the quad ring passing through the active/first selected edge at <paramref name="slideFactor"/>.
+    /// </summary>
+    public bool ExecuteInsertEdgeLoop(EditorScene scene, SelectionManager selection, float slideFactor, UndoRedoStack undoStack)
+    {
+        if (!selection.ActiveObjectId.HasValue || selection.SelectedEdges.Count == 0)
+        {
+            return false;
+        }
+
+        SceneObject? obj = scene.GetObject(selection.ActiveObjectId.Value);
+        if (obj?.Mesh is null)
+        {
+            return false;
+        }
+
+        EdgeKey seedEdge = selection.SelectedEdges.First();
+        EditorScene before = scene.CloneSnapshot();
+        IReadOnlyList<EdgeKey> loopEdges = MeshTopologyOps.InsertEdgeLoop(obj.Mesh, seedEdge, slideFactor);
+        if (loopEdges.Count > 0)
+        {
+            selection.SetMode(InteractionMode.Edge, scene);
+            selection.ClearSelection();
+            for (int i = 0; i < loopEdges.Count; i++)
+            {
+                selection.ToggleSelectEdge(loopEdges[i]);
+            }
+            undoStack.RecordAction($"Loop Cut (t={slideFactor:0.##})", before, scene);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Deletes selected faces.
     /// </summary>
     public bool ExecuteDeleteFaces(EditorScene scene, SelectionManager selection, UndoRedoStack undoStack)

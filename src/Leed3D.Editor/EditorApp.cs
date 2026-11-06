@@ -314,9 +314,12 @@ public sealed class EditorApp : IDisposable
 
     private string _statusMessage = "Ready — Click primitive buttons to add, Shift+A for quick-add menu, RMB+WASD to fly.";
 
-    // Subdivide, Weld, Mirror & Array parameters
+    // Subdivide, Weld, Bevel, Loop Cut, Mirror & Array parameters
     private int _subdivideCuts = 1;
     private float _weldThreshold = 0.01f;
+    private float _bevelWidth = 0.2f;
+    private int _bevelSegments = 1;
+    private float _loopCutSlideFactor = 0.5f;
     private Axis3D _mirrorAxis = Axis3D.X;
     private float _mirrorPlaneCoord;
     private bool _mirrorKeepOriginal = true;
@@ -1044,6 +1047,16 @@ public sealed class EditorApp : IDisposable
             ImGui.OpenPopup("SubdividePopup");
             ShortcutHandler.OpenSubdividePopupRequested = false;
         }
+        if (ShortcutHandler.OpenBevelPopupRequested)
+        {
+            ImGui.OpenPopup("BevelPopup");
+            ShortcutHandler.OpenBevelPopupRequested = false;
+        }
+        if (ShortcutHandler.OpenLoopCutPopupRequested)
+        {
+            ImGui.OpenPopup("LoopCutPopup");
+            ShortcutHandler.OpenLoopCutPopupRequested = false;
+        }
         if (ShortcutHandler.OpenMirrorPopupRequested)
         {
             ImGui.OpenPopup("MirrorPopup");
@@ -1065,6 +1078,8 @@ public sealed class EditorApp : IDisposable
         DrawNormalsContextMenu();
         DrawWeldVerticesPopup();
         DrawSubdividePopup();
+        DrawBevelPopup();
+        DrawLoopCutPopup();
         DrawMirrorPopup();
         DrawLinearArrayPopup();
         DrawRadialArrayPopup();
@@ -1449,6 +1464,10 @@ public sealed class EditorApp : IDisposable
                 Ray3D ray = Camera.ScreenPointToRay(_viewportLocalMousePos, _viewportRenderer.ViewportSize);
                 EditController.StartExtrude(Scene, Selection, ray, Camera.GetForward(), UndoStack);
             }
+            ImGui.SameLine();
+            if (ImGui.Button("Bevel (Ctrl+B)...")) ShortcutHandler.OpenBevelPopupRequested = true;
+            ImGui.SameLine();
+            if (ImGui.Button("Loop Cut (Ctrl+R)...")) ShortcutHandler.OpenLoopCutPopupRequested = true;
             ImGui.SameLine();
             if (ImGui.Button("Subdivide...")) ShortcutHandler.OpenSubdividePopupRequested = true;
             ImGui.SameLine();
@@ -3605,6 +3624,67 @@ public sealed class EditorApp : IDisposable
             if (ImGui.Button("Apply", new Vector2(100, 0)))
             {
                 EditController.ExecuteSubdivideEdges(Scene, Selection, _subdivideCuts, UndoStack);
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel", new Vector2(100, 0)))
+            {
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawBevelPopup()
+    {
+        if (ImGui.BeginPopup("BevelPopup"))
+        {
+            ImGui.TextDisabled("Bevel / Chamfer Edges (Ctrl+B)");
+            ImGui.Separator();
+            ImGui.DragFloat("Width", ref _bevelWidth, 0.02f, 0.005f, 10.0f, "%.3f m");
+            ImGui.SliderInt("Segments", ref _bevelSegments, 1, 8);
+            if (ImGui.Button("Apply", new Vector2(100, 0)))
+            {
+                if (EditController.ExecuteBevelEdges(Scene, Selection, _bevelWidth, _bevelSegments, UndoStack))
+                {
+                    StatusMessage = $"Beveled edges (width={_bevelWidth:0.###}, segments={_bevelSegments}).";
+                }
+                else
+                {
+                    StatusMessage = "Select one or more manifold edges in Edge Mode to bevel.";
+                }
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel", new Vector2(100, 0)))
+            {
+                ImGui.CloseCurrentPopup();
+            }
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawLoopCutPopup()
+    {
+        if (ImGui.BeginPopup("LoopCutPopup"))
+        {
+            ImGui.TextDisabled("Loop Cut & Slide (Ctrl+R)");
+            ImGui.Separator();
+            ImGui.SliderFloat("Slide Factor", ref _loopCutSlideFactor, 0.05f, 0.95f, "%.2f");
+            if (ImGui.Button("Center (0.50)", new Vector2(-1, 0)))
+            {
+                _loopCutSlideFactor = 0.5f;
+            }
+            if (ImGui.Button("Apply", new Vector2(100, 0)))
+            {
+                if (EditController.ExecuteInsertEdgeLoop(Scene, Selection, _loopCutSlideFactor, UndoStack))
+                {
+                    StatusMessage = $"Inserted edge loop at slide factor {_loopCutSlideFactor:0.00}.";
+                }
+                else
+                {
+                    StatusMessage = "Select an edge on a quad ring in Edge Mode to insert a loop cut.";
+                }
                 ImGui.CloseCurrentPopup();
             }
             ImGui.SameLine();

@@ -1998,6 +1998,953 @@ public static class MeshTopologyOps
         mesh.InvalidateTopology();
     }
 
+    /// <summary>
+    /// Inserts a continuous edge loop across the ring of quad faces passing through <paramref name="startEdge"/>,
+    /// positioning the cut vertices at <paramref name="slideFactor"/> in <c>[0.01, 0.99]</c> along each crossed edge.
+    /// Returns the newly created loop edges.
+    /// </summary>
+    public static IReadOnlyList<EdgeKey> InsertEdgeLoop(
+        EditableMesh mesh,
+        EdgeKey startEdge,
+        float slideFactor = 0.5f)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+
+        float t = System.Math.Clamp(slideFactor, 0.01f, 0.99f);
+        TopologyGraph topology = mesh.GetTopology();
+        TopologyEdge? startTopo = topology.GetEdge(startEdge);
+        if (startTopo is null)
+        {
+            return [];
+        }
+
+        // Collect quad faces incident to startEdge
+        var quadFaceSteps = new List<(int FaceId, EdgeKey EdgeA, EdgeKey EdgeB)>();
+        var orientedEdgeMap = new Dictionary<EdgeKey, (int U, int V)>();
+        var visitedFaces = new HashSet<int>();
+
+        orientedEdgeMap[startEdge] = (startEdge.VMin, startEdge.VMax);
+
+        void WalkQuadRing(EdgeKey currentEdge, int startFaceId)
+        {
+            EdgeKey edge = currentEdge;
+            int faceId = startFaceId;
+
+            while (faceId >= 0)
+            {
+                PolygonFace? face = mesh.GetFace(faceId);
+                if (face is null || face.VertexIds.Count != 4 || !visitedFaces.Add(faceId))
+                {
+                    break;
+                }
+
+                (int u, int v) = orientedEdgeMap[edge];
+                List<int> vIds = face.VertexIds;
+
+                // Find indices of u and v in the quad
+                int idxU = vIds.IndexOf(u);
+                int idxV = vIds.IndexOf(v);
+                if (idxU < 0 || idxV < 0)
+                {
+                    break;
+                }
+
+                int oppU;
+                int oppV;
+                if ((idxU + 1) % 4 == idxV)
+                {
+                    oppU = vIds[(idxU + 3) % 4];
+                    oppV = vIds[(idxU + 2) % 4];
+                }
+                else if ((idxV + 1) % 4 == idxU)
+                {
+                    oppV = vIds[(idxV + 3) % 4];
+                    oppU = vIds[(idxV + 2) % 4];
+                }
+                else
+                {
+                    break;
+                }
+
+                var oppEdge = new EdgeKey(oppU, oppV);
+                if (!orientedEdgeMap.ContainsKey(oppEdge))
+                {
+                    orientedEdgeMap[oppEdge] = (oppU, oppV);
+                }
+
+                quadFaceSteps.Add((faceId, edge, oppEdge));
+
+                TopologyEdge? oppTopo = topology.GetEdge(oppEdge);
+                if (oppTopo is null)
+                {
+                    break;
+                }
+
+                int nextFaceId = -1;
+                for (int i = 0; i < oppTopo.IncidentFaceIds.Count; i++)
+                {
+                    int candFaceId = oppTopo.IncidentFaceIds[i];
+                    if (candFaceId != faceId && !visitedFaces.Contains(candFaceId))
+                    {
+                        nextFaceId = candFaceId;
+                        break;
+                    }
+                }
+
+                edge = oppEdge;
+                faceId = nextFaceId;
+            }
+        }
+
+        if (startTopo.IncidentFaceIds.Count >= 1)
+        {
+            WalkQuadRing(startEdge, startTopo.IncidentFaceIds[0]);
+        }
+
+        if (startTopo.IncidentFaceIds.Count >= 2 && !visitedFaces.Contains(startTopo.IncidentFaceIds[1]))
+        {
+            WalkQuadRing(startEdge, startTopo.IncidentFaceIds[1]);
+        }
+
+        if (quadFaceSteps.Count == 0)
+        {
+            return [];
+        }
+
+        // Create split vertex on each crossed edge
+        var edgeSplitVertex = new Dictionary<EdgeKey, int>(orientedEdgeMap.Count);
+        foreach (var (edgeKey, (u, v)) in orientedEdgeMap)
+        {
+            MeshVertex? vertU = mesh.GetVertex(u);
+            MeshVertex? vertV = mesh.GetVertex(v);
+            if (vertU is null || vertV is null)
+            {
+                continue;
+            }
+
+            Vector3 splitPos = Vector3.Lerp(vertU.Position, vertV.Position, t);
+            int splitVertId = mesh.AddVertex(splitPos);
+            edgeSplitVertex[edgeKey] = splitVertId;
+        }
+
+        // Insert split vertices into any non-ring faces that share a crossed edge so no T-junctions are left
+        foreach (var (edgeKey, splitVertId) in edgeSplitVertex)
+        {
+            TopologyEdge? topoEdge = topology.GetEdge(edgeKey);
+            if (topoEdge is null)
+            {
+                continue;
+            }
+
+            for (int i = 0; i < topoEdge.IncidentFaceIds.Count; i++)
+            {
+                int incFaceId = topoEdge.IncidentFaceIds[i];
+                if (visitedFaces.Contains(incFaceId))
+                {
+                    continue;
+                }
+
+                PolygonFace? nonRingFace = mesh.GetFace(incFaceId);
+                if (nonRingFace is null)
+                {
+                    continue;
+                }
+
+                List<int> loop = nonRingFace.VertexIds;
+                int count = loop.Count;
+                for (int j = 0; j < count; j++)
+                {
+                    int a = loop[j];
+                    int b = loop[(j + 1) % count];
+                    if (new EdgeKey(a, b) == edgeKey)
+                    {
+                        loop.Insert(j + 1, splitVertId);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Split each quad face in the ring into 2 quads and collect the new loop edges
+        var createdLoopEdges = new List<EdgeKey>(quadFaceSteps.Count);
+
+        for (int i = 0; i < quadFaceSteps.Count; i++)
+        {
+            (int faceId, EdgeKey edgeA, EdgeKey edgeB) = quadFaceSteps[i];
+            PolygonFace? face = mesh.GetFace(faceId);
+            if (face is null || face.VertexIds.Count != 4)
+            {
+                continue;
+            }
+
+            if (!edgeSplitVertex.TryGetValue(edgeA, out int mA) ||
+                !edgeSplitVertex.TryGetValue(edgeB, out int mB))
+            {
+                continue;
+            }
+
+            List<int> vIds = face.VertexIds;
+            // Rotate quad loop so edgeA is (vIds[0], vIds[1]) and edgeB is (vIds[2], vIds[3])
+            int startIdx = -1;
+            for (int j = 0; j < 4; j++)
+            {
+                if (new EdgeKey(vIds[j], vIds[(j + 1) % 4]) == edgeA)
+                {
+                    startIdx = j;
+                    break;
+                }
+            }
+
+            if (startIdx < 0)
+            {
+                continue;
+            }
+
+            int v0 = vIds[startIdx];
+            int v1 = vIds[(startIdx + 1) % 4];
+            int v2 = vIds[(startIdx + 2) % 4];
+            int v3 = vIds[(startIdx + 3) % 4];
+
+            string matId = face.MaterialId;
+            var uvClone = face.UvMapping.Clone();
+            var metaClone = face.Metadata.Clone();
+
+            // Replace original quad in place with first half
+            vIds.Clear();
+            vIds.Add(v0);
+            vIds.Add(mA);
+            vIds.Add(mB);
+            vIds.Add(v3);
+
+            // Add second half quad preserving material, UV, and metadata
+            mesh.AddFace([mA, v1, v2, mB], matId, uvClone, metaClone);
+            createdLoopEdges.Add(new EdgeKey(mA, mB));
+        }
+
+        mesh.ValidateAndRepair();
+        return createdLoopEdges;
+    }
+
+    /// <summary>
+    /// Bevels / chamfers the specified edges on <paramref name="mesh"/> by <paramref name="width"/>
+    /// with <paramref name="segments"/> subdivision strips (<c>1</c> = flat chamfer, <c>&gt;1</c> = rounded bevel).
+    /// Returns the IDs of all newly created bevel and corner faces.
+    /// </summary>
+    public static IReadOnlyList<int> BevelEdges(
+        EditableMesh mesh,
+        IReadOnlyCollection<EdgeKey> edges,
+        float width,
+        int segments = 1)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+        ArgumentNullException.ThrowIfNull(edges);
+
+        if (edges.Count == 0 || width <= 1e-5f)
+        {
+            return [];
+        }
+
+        int segs = System.Math.Clamp(segments, 1, 16);
+        TopologyGraph topology = mesh.GetTopology();
+
+        var selectedEdges = new HashSet<EdgeKey>();
+        foreach (EdgeKey key in edges)
+        {
+            TopologyEdge? te = topology.GetEdge(key);
+            if (te is not null && te.IncidentFaceIds.Count == 2)
+            {
+                selectedEdges.Add(key);
+            }
+        }
+
+        if (selectedEdges.Count == 0)
+        {
+            return [];
+        }
+
+        // Cache original vertex positions and face normals before any topological mutations
+        var origPositions = new Dictionary<int, Vector3>(mesh.VertexCount);
+        foreach (MeshVertex v in mesh.Vertices)
+        {
+            origPositions[v.Id] = v.Position;
+        }
+
+        var origFaceNormals = new Dictionary<int, Vector3>(mesh.FaceCount);
+        var origFaceCentroids = new Dictionary<int, Vector3>(mesh.FaceCount);
+        foreach (PolygonFace f in mesh.Faces)
+        {
+            origFaceNormals[f.Id] = f.ComputeNormal(mesh);
+            origFaceCentroids[f.Id] = f.ComputeCentroid(mesh);
+        }
+
+        // Collect affected vertices and clamp bevel width per vertex to 45% of its shortest incident edge
+        var affectedVertices = new HashSet<int>();
+        foreach (EdgeKey e in selectedEdges)
+        {
+            affectedVertices.Add(e.VMin);
+            affectedVertices.Add(e.VMax);
+        }
+
+        // For each (EdgeKey, endpointVertexId), we determine the bevel chain of (segs + 1) vertices
+        // ordered from IncidentFaceIds[0] to IncidentFaceIds[1].
+        var edgeEndpointChains = new Dictionary<(EdgeKey Edge, int VertexId), int[]>();
+        // For each (FaceId, VertexId), the replacement vertex IDs to substitute in FaceId's VertexIds loop
+        var faceVertexReplacements = new Dictionary<(int FaceId, int VertexId), int[]>();
+        var createdFaceIds = new List<int>();
+        var pendingCornerFaces = new List<(List<int> Loop, Vector3 ExpectedNormal, string MaterialId)>();
+
+        foreach (int vId in affectedVertices)
+        {
+            Vector3 pV = origPositions[vId];
+            IReadOnlyList<int> connectedVerts = topology.GetVertexConnectedVertices(vId);
+            float minEdgeLen = float.PositiveInfinity;
+            var incidentSelectedEdges = new List<EdgeKey>();
+
+            for (int i = 0; i < connectedVerts.Count; i++)
+            {
+                int nId = connectedVerts[i];
+                float len = Vector3.Distance(pV, origPositions[nId]);
+                if (len < minEdgeLen)
+                {
+                    minEdgeLen = len;
+                }
+
+                var ek = new EdgeKey(vId, nId);
+                if (selectedEdges.Contains(ek))
+                {
+                    incidentSelectedEdges.Add(ek);
+                }
+            }
+
+            float localWidth = System.Math.Min(width, minEdgeLen * 0.45f);
+            if (localWidth <= 1e-5f)
+            {
+                localWidth = width;
+            }
+
+            int m = incidentSelectedEdges.Count;
+            if (m == 1)
+            {
+                EdgeKey bevEdge = incidentSelectedEdges[0];
+                TopologyEdge topoEdge = topology.GetEdge(bevEdge)!;
+                int f0Id = topoEdge.IncidentFaceIds[0];
+                int f1Id = topoEdge.IncidentFaceIds[1];
+
+                Vector3 pos0 = ComputeVertexOffsetInFaceAwayFromEdge(mesh, f0Id, vId, bevEdge, origPositions, origFaceNormals[f0Id], localWidth);
+                Vector3 pos1 = ComputeVertexOffsetInFaceAwayFromEdge(mesh, f1Id, vId, bevEdge, origPositions, origFaceNormals[f1Id], localWidth);
+
+                int[] chain = CreateBevelArcVertices(mesh, vId, pV, pos0, pos1, segs);
+                edgeEndpointChains[(bevEdge, vId)] = chain;
+
+                faceVertexReplacements[(f0Id, vId)] = [chain[0]];
+                faceVertexReplacements[(f1Id, vId)] = [chain[segs]];
+
+                // Any other face incident to vId (the end face(s) at the termination of bevEdge) gets the chain inserted
+                IReadOnlyList<int> incFaces = topology.GetVertexIncidentFaces(vId);
+                for (int i = 0; i < incFaces.Count; i++)
+                {
+                    int fId = incFaces[i];
+                    if (fId == f0Id || fId == f1Id)
+                    {
+                        continue;
+                    }
+
+                    PolygonFace? endFace = mesh.GetFace(fId);
+                    if (endFace is null)
+                    {
+                        continue;
+                    }
+
+                    // Check whether in endFace, the edge shared with f0 comes before or after vId
+                    bool f0BeforeF1 = IsFaceSharedWithPreviousEdgeAtVertex(endFace, vId, mesh.GetFace(f0Id)!);
+                    if (f0BeforeF1)
+                    {
+                        faceVertexReplacements[(fId, vId)] = chain;
+                    }
+                    else
+                    {
+                        int[] reversed = new int[chain.Length];
+                        for (int k = 0; k < chain.Length; k++)
+                        {
+                            reversed[k] = chain[chain.Length - 1 - k];
+                        }
+                        faceVertexReplacements[(fId, vId)] = reversed;
+                    }
+                }
+            }
+            else if (m == 2)
+            {
+                // Partition incident faces around vId into two sectors separated by the 2 beveled edges
+                EdgeKey eA = incidentSelectedEdges[0];
+                EdgeKey eB = incidentSelectedEdges[1];
+                (List<int> sector0, List<int> sector1) = PartitionVertexFacesIntoTwoSectors(topology, vId, eA, eB);
+
+                Vector3 pos0 = ComputeSectorVertexOffset(mesh, sector0, vId, eA, eB, origPositions, origFaceNormals, localWidth);
+                Vector3 pos1 = ComputeSectorVertexOffset(mesh, sector1, vId, eA, eB, origPositions, origFaceNormals, localWidth);
+
+                int[] sharedChain = CreateBevelArcVertices(mesh, vId, pV, pos0, pos1, segs);
+
+                for (int i = 0; i < sector0.Count; i++)
+                {
+                    faceVertexReplacements[(sector0[i], vId)] = [sharedChain[0]];
+                }
+                for (int i = 0; i < sector1.Count; i++)
+                {
+                    faceVertexReplacements[(sector1[i], vId)] = [sharedChain[segs]];
+                }
+
+                foreach (EdgeKey bevEdge in incidentSelectedEdges)
+                {
+                    TopologyEdge te = topology.GetEdge(bevEdge)!;
+                    int f0Id = te.IncidentFaceIds[0];
+                    bool f0InSector0 = sector0.Contains(f0Id);
+                    if (f0InSector0)
+                    {
+                        edgeEndpointChains[(bevEdge, vId)] = sharedChain;
+                    }
+                    else
+                    {
+                        int[] rev = new int[sharedChain.Length];
+                        for (int k = 0; k < sharedChain.Length; k++)
+                        {
+                            rev[k] = sharedChain[sharedChain.Length - 1 - k];
+                        }
+                        edgeEndpointChains[(bevEdge, vId)] = rev;
+                    }
+                }
+            }
+            else
+            {
+                // m >= 3 beveled edges meeting at vId:
+                // Order the incident faces around vId cyclically and group into m sectors separated by the m selected edges
+                List<(List<int> SectorFaces, EdgeKey PrevEdge, EdgeKey NextEdge)> sectors =
+                    OrderVertexSectorsAroundCorner(mesh, topology, vId, selectedEdges, origFaceNormals);
+
+                int sectorCount = sectors.Count;
+                var sectorApexVerts = new int[sectorCount];
+                var sectorPositions = new Vector3[sectorCount];
+
+                for (int s = 0; s < sectorCount; s++)
+                {
+                    var (sectorFaces, prevEdge, nextEdge) = sectors[s];
+                    Vector3 offsetPos = ComputeSectorVertexOffset(mesh, sectorFaces, vId, prevEdge, nextEdge, origPositions, origFaceNormals, localWidth);
+                    sectorPositions[s] = offsetPos;
+                    int newV = mesh.AddVertex(offsetPos, mesh.GetVertex(vId)?.Metadata.Clone());
+                    sectorApexVerts[s] = newV;
+
+                    for (int f = 0; f < sectorFaces.Count; f++)
+                    {
+                        faceVertexReplacements[(sectorFaces[f], vId)] = [newV];
+                    }
+                }
+
+                var cornerLoop = new List<int>();
+                for (int s = 0; s < sectorCount; s++)
+                {
+                    int nextS = (s + 1) % sectorCount;
+                    EdgeKey sharedBevEdge = sectors[s].NextEdge;
+
+                    int vStart = sectorApexVerts[s];
+                    int vEnd = sectorApexVerts[nextS];
+                    Vector3 pStart = sectorPositions[s];
+                    Vector3 pEnd = sectorPositions[nextS];
+
+                    var chainFromStoNext = new int[segs + 1];
+                    chainFromStoNext[0] = vStart;
+                    chainFromStoNext[segs] = vEnd;
+                    cornerLoop.Add(vStart);
+
+                    for (int k = 1; k < segs; k++)
+                    {
+                        float frac = (float)k / segs;
+                        Vector3 midPos = Vector3.Lerp(pStart, pEnd, frac);
+                        int midV = mesh.AddVertex(midPos, mesh.GetVertex(vId)?.Metadata.Clone());
+                        chainFromStoNext[k] = midV;
+                        cornerLoop.Add(midV);
+                    }
+
+                    TopologyEdge te = topology.GetEdge(sharedBevEdge)!;
+                    int f0Id = te.IncidentFaceIds[0];
+                    bool f0InSectorS = sectors[s].SectorFaces.Contains(f0Id);
+                    if (f0InSectorS)
+                    {
+                        edgeEndpointChains[(sharedBevEdge, vId)] = chainFromStoNext;
+                    }
+                    else
+                    {
+                        int[] rev = new int[chainFromStoNext.Length];
+                        for (int k = 0; k < chainFromStoNext.Length; k++)
+                        {
+                            rev[k] = chainFromStoNext[chainFromStoNext.Length - 1 - k];
+                        }
+                        edgeEndpointChains[(sharedBevEdge, vId)] = rev;
+                    }
+                }
+
+                if (cornerLoop.Count >= 3)
+                {
+                    Vector3 avgNormal = Vector3.Zero;
+                    IReadOnlyList<int> incFaces = topology.GetVertexIncidentFaces(vId);
+                    string matId = PolygonFace.DefaultMaterialId;
+                    for (int i = 0; i < incFaces.Count; i++)
+                    {
+                        avgNormal += origFaceNormals[incFaces[i]];
+                        if (i == 0 && mesh.GetFace(incFaces[i]) is { } firstFace)
+                        {
+                            matId = firstFace.MaterialId;
+                        }
+                    }
+
+                    pendingCornerFaces.Add((cornerLoop, avgNormal, matId));
+                }
+            }
+        }
+
+        // 1. Update all existing faces with their replacement vertices
+        foreach (PolygonFace face in mesh.Faces)
+        {
+            List<int> vIds = face.VertexIds;
+            var updatedLoop = new List<int>(vIds.Count + 4);
+            for (int i = 0; i < vIds.Count; i++)
+            {
+                int origV = vIds[i];
+                if (faceVertexReplacements.TryGetValue((face.Id, origV), out int[]? replacements))
+                {
+                    for (int r = 0; r < replacements.Length; r++)
+                    {
+                        updatedLoop.Add(replacements[r]);
+                    }
+                }
+                else
+                {
+                    updatedLoop.Add(origV);
+                }
+            }
+
+            vIds.Clear();
+            vIds.AddRange(updatedLoop);
+        }
+
+        // 2. Create `segs` bevel quad faces along each beveled edge
+        foreach (EdgeKey bevEdge in selectedEdges)
+        {
+            if (!edgeEndpointChains.TryGetValue((bevEdge, bevEdge.VMin), out int[]? chainMin) ||
+                !edgeEndpointChains.TryGetValue((bevEdge, bevEdge.VMax), out int[]? chainMax))
+            {
+                continue;
+            }
+
+            TopologyEdge te = topology.GetEdge(bevEdge)!;
+            int f0Id = te.IncidentFaceIds[0];
+            int f1Id = te.IncidentFaceIds[1];
+            PolygonFace? f0 = mesh.GetFace(f0Id);
+            string matId = f0?.MaterialId ?? PolygonFace.DefaultMaterialId;
+            Vector3 expectedNormal = origFaceNormals[f0Id] + origFaceNormals[f1Id];
+            if (expectedNormal.LengthSquared() <= 1e-8f)
+            {
+                expectedNormal = origFaceNormals[f0Id];
+            }
+
+            for (int k = 0; k < segs; k++)
+            {
+                int a0 = chainMin[k];
+                int b0 = chainMax[k];
+                int b1 = chainMax[k + 1];
+                int a1 = chainMin[k + 1];
+
+                var quadLoop = new List<int> { a0, b0, b1, a1 };
+                EnsureLoopNormalMatches(mesh, quadLoop, expectedNormal);
+                int newFaceId = mesh.AddFace(quadLoop, matId);
+                createdFaceIds.Add(newFaceId);
+            }
+        }
+
+        // 3. Create corner faces at valence-3+ beveled vertices
+        for (int i = 0; i < pendingCornerFaces.Count; i++)
+        {
+            var (cornerLoop, expectedNormal, matId) = pendingCornerFaces[i];
+            EnsureLoopNormalMatches(mesh, cornerLoop, expectedNormal);
+            int cornerFaceId = mesh.AddFace(cornerLoop, matId);
+            createdFaceIds.Add(cornerFaceId);
+        }
+
+        mesh.ValidateAndRepair();
+        return createdFaceIds;
+    }
+
+    private static int[] CreateBevelArcVertices(
+        EditableMesh mesh,
+        int origVertexId,
+        Vector3 apexPos,
+        Vector3 pos0,
+        Vector3 pos1,
+        int segments)
+    {
+        var metaTemplate = mesh.GetVertex(origVertexId)?.Metadata;
+        var chain = new int[segments + 1];
+        chain[0] = mesh.AddVertex(pos0, metaTemplate?.Clone());
+        chain[segments] = mesh.AddVertex(pos1, metaTemplate?.Clone());
+
+        if (segments > 1)
+        {
+            Vector3 mid = (pos0 + pos1) * 0.5f;
+            Vector3 control = Vector3.Lerp(mid, apexPos, 0.5f);
+            for (int k = 1; k < segments; k++)
+            {
+                float t = (float)k / segments;
+                float u = 1.0f - t;
+                Vector3 arcPos = (u * u * pos0) + (2.0f * u * t * control) + (t * t * pos1);
+                chain[k] = mesh.AddVertex(arcPos, metaTemplate?.Clone());
+            }
+        }
+
+        return chain;
+    }
+
+    private static Vector3 ComputeVertexOffsetInFaceAwayFromEdge(
+        EditableMesh mesh,
+        int faceId,
+        int vertexId,
+        EdgeKey beveledEdge,
+        Dictionary<int, Vector3> origPositions,
+        Vector3 faceNormal,
+        float width)
+    {
+        PolygonFace? face = mesh.GetFace(faceId);
+        Vector3 pCurr = origPositions[vertexId];
+        if (face is null)
+        {
+            return pCurr;
+        }
+
+        List<int> vIds = face.VertexIds;
+        int n = vIds.Count;
+        int idx = vIds.IndexOf(vertexId);
+        if (idx < 0)
+        {
+            return pCurr;
+        }
+
+        int prevId = vIds[(idx - 1 + n) % n];
+        int nextId = vIds[(idx + 1) % n];
+
+        int otherVertId = new EdgeKey(vertexId, prevId) == beveledEdge ? nextId : prevId;
+        Vector3 dir = origPositions[otherVertId] - pCurr;
+        if (dir.LengthSquared() > 1e-10f)
+        {
+            return pCurr + (Vector3.Normalize(dir) * width);
+        }
+
+        int bevOtherId = beveledEdge.GetOtherVertex(vertexId);
+        Vector3 edgeDir = Vector3.Normalize(origPositions[bevOtherId] - pCurr);
+        Vector3 inPlanePerp = Vector3.Cross(faceNormal, edgeDir);
+        if (inPlanePerp.LengthSquared() > 1e-10f)
+        {
+            inPlanePerp = Vector3.Normalize(inPlanePerp);
+        }
+        return pCurr + (inPlanePerp * width);
+    }
+
+    private static bool IsFaceSharedWithPreviousEdgeAtVertex(PolygonFace endFace, int vertexId, PolygonFace targetNeighborFace)
+    {
+        List<int> vIds = endFace.VertexIds;
+        int n = vIds.Count;
+        int idx = vIds.IndexOf(vertexId);
+        if (idx < 0)
+        {
+            return true;
+        }
+
+        int prevVert = vIds[(idx - 1 + n) % n];
+        var prevEdge = new EdgeKey(prevVert, vertexId);
+
+        List<int> targetIds = targetNeighborFace.VertexIds;
+        int tCount = targetIds.Count;
+        for (int i = 0; i < tCount; i++)
+        {
+            if (new EdgeKey(targetIds[i], targetIds[(i + 1) % tCount]) == prevEdge)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static (List<int> Sector0, List<int> Sector1) PartitionVertexFacesIntoTwoSectors(
+        TopologyGraph topology,
+        int vertexId,
+        EdgeKey edgeA,
+        EdgeKey edgeB)
+    {
+        IReadOnlyList<int> allFaces = topology.GetVertexIncidentFaces(vertexId);
+        var sector0 = new List<int>();
+        var sector1 = new List<int>();
+        if (allFaces.Count == 0)
+        {
+            return (sector0, sector1);
+        }
+
+        var visited = new HashSet<int>();
+        var queue = new Queue<int>();
+        int seed = allFaces[0];
+        visited.Add(seed);
+        sector0.Add(seed);
+        queue.Enqueue(seed);
+
+        while (queue.Count > 0)
+        {
+            int currFace = queue.Dequeue();
+            for (int i = 0; i < allFaces.Count; i++)
+            {
+                int otherFace = allFaces[i];
+                if (visited.Contains(otherFace))
+                {
+                    continue;
+                }
+
+                EdgeKey? sharedAtV = FindSharedEdgeAtVertex(topology, vertexId, currFace, otherFace);
+                if (sharedAtV.HasValue && sharedAtV.Value != edgeA && sharedAtV.Value != edgeB)
+                {
+                    visited.Add(otherFace);
+                    sector0.Add(otherFace);
+                    queue.Enqueue(otherFace);
+                }
+            }
+        }
+
+        for (int i = 0; i < allFaces.Count; i++)
+        {
+            if (!visited.Contains(allFaces[i]))
+            {
+                sector1.Add(allFaces[i]);
+            }
+        }
+
+        return (sector0, sector1);
+    }
+
+    private static EdgeKey? FindSharedEdgeAtVertex(TopologyGraph topology, int vertexId, int faceA, int faceB)
+    {
+        IReadOnlyList<int> heA = topology.GetFaceHalfEdgeIds(faceA);
+        IReadOnlyList<int> heB = topology.GetFaceHalfEdgeIds(faceB);
+        for (int i = 0; i < heA.Count; i++)
+        {
+            EdgeKey ekA = topology.HalfEdges[heA[i]].EdgeKey;
+            if (!ekA.ContainsVertex(vertexId))
+            {
+                continue;
+            }
+
+            for (int j = 0; j < heB.Count; j++)
+            {
+                if (topology.HalfEdges[heB[j]].EdgeKey == ekA)
+                {
+                    return ekA;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static List<(List<int> SectorFaces, EdgeKey PrevEdge, EdgeKey NextEdge)> OrderVertexSectorsAroundCorner(
+        EditableMesh mesh,
+        TopologyGraph topology,
+        int vertexId,
+        HashSet<EdgeKey> selectedEdges,
+        Dictionary<int, Vector3> origFaceNormals)
+    {
+        IReadOnlyList<int> incFaces = topology.GetVertexIncidentFaces(vertexId);
+        var remaining = new HashSet<int>(incFaces);
+        var rawSectors = new List<(List<int> Faces, EdgeKey EdgeA, EdgeKey EdgeB)>();
+
+        while (remaining.Count > 0)
+        {
+            int seed = remaining.First();
+            remaining.Remove(seed);
+            var comp = new List<int> { seed };
+            var queue = new Queue<int>();
+            queue.Enqueue(seed);
+
+            while (queue.Count > 0)
+            {
+                int curr = queue.Dequeue();
+                foreach (int cand in remaining.ToList())
+                {
+                    EdgeKey? shared = FindSharedEdgeAtVertex(topology, vertexId, curr, cand);
+                    if (shared.HasValue && !selectedEdges.Contains(shared.Value))
+                    {
+                        remaining.Remove(cand);
+                        comp.Add(cand);
+                        queue.Enqueue(cand);
+                    }
+                }
+            }
+
+            var boundarySelectedEdges = new List<EdgeKey>();
+            for (int i = 0; i < comp.Count; i++)
+            {
+                PolygonFace f = mesh.GetFace(comp[i])!;
+                int n = f.VertexIds.Count;
+                int idx = f.VertexIds.IndexOf(vertexId);
+                if (idx < 0) continue;
+
+                var ePrev = new EdgeKey(f.VertexIds[(idx - 1 + n) % n], vertexId);
+                var eNext = new EdgeKey(vertexId, f.VertexIds[(idx + 1) % n]);
+                if (selectedEdges.Contains(ePrev) && !boundarySelectedEdges.Contains(ePrev))
+                {
+                    boundarySelectedEdges.Add(ePrev);
+                }
+                if (selectedEdges.Contains(eNext) && !boundarySelectedEdges.Contains(eNext))
+                {
+                    boundarySelectedEdges.Add(eNext);
+                }
+            }
+
+            if (boundarySelectedEdges.Count >= 2)
+            {
+                rawSectors.Add((comp, boundarySelectedEdges[0], boundarySelectedEdges[1]));
+            }
+        }
+
+        if (rawSectors.Count == 0)
+        {
+            return [];
+        }
+
+        var ordered = new List<(List<int> SectorFaces, EdgeKey PrevEdge, EdgeKey NextEdge)>(rawSectors.Count);
+        var used = new bool[rawSectors.Count];
+
+        var first = rawSectors[0];
+        used[0] = true;
+        PolygonFace firstFace = mesh.GetFace(first.Faces[0])!;
+        int firstIdx = firstFace.VertexIds.IndexOf(vertexId);
+        int firstCount = firstFace.VertexIds.Count;
+        var incomingEdge = new EdgeKey(firstFace.VertexIds[(firstIdx - 1 + firstCount) % firstCount], vertexId);
+        EdgeKey currPrev = first.EdgeA == incomingEdge ? first.EdgeA : first.EdgeB;
+        EdgeKey currNext = currPrev == first.EdgeA ? first.EdgeB : first.EdgeA;
+        ordered.Add((first.Faces, currPrev, currNext));
+
+        for (int step = 1; step < rawSectors.Count; step++)
+        {
+            EdgeKey targetPrev = ordered[^1].NextEdge;
+            int foundIdx = -1;
+            for (int i = 0; i < rawSectors.Count; i++)
+            {
+                if (!used[i] && (rawSectors[i].EdgeA == targetPrev || rawSectors[i].EdgeB == targetPrev))
+                {
+                    foundIdx = i;
+                    break;
+                }
+            }
+
+            if (foundIdx < 0)
+            {
+                break;
+            }
+
+            used[foundIdx] = true;
+            var sec = rawSectors[foundIdx];
+            EdgeKey nextEdge = sec.EdgeA == targetPrev ? sec.EdgeB : sec.EdgeA;
+            ordered.Add((sec.Faces, targetPrev, nextEdge));
+        }
+
+        return ordered;
+    }
+
+    private static Vector3 ComputeSectorVertexOffset(
+        EditableMesh mesh,
+        List<int> sectorFaces,
+        int vertexId,
+        EdgeKey bevEdgeA,
+        EdgeKey bevEdgeB,
+        Dictionary<int, Vector3> origPositions,
+        Dictionary<int, Vector3> origFaceNormals,
+        float width)
+    {
+        Vector3 pCurr = origPositions[vertexId];
+        if (sectorFaces.Count == 0)
+        {
+            return pCurr;
+        }
+
+        for (int i = 0; i < sectorFaces.Count; i++)
+        {
+            PolygonFace? f = mesh.GetFace(sectorFaces[i]);
+            if (f is null) continue;
+            int n = f.VertexIds.Count;
+            int idx = f.VertexIds.IndexOf(vertexId);
+            if (idx < 0) continue;
+
+            int prevV = f.VertexIds[(idx - 1 + n) % n];
+            int nextV = f.VertexIds[(idx + 1) % n];
+
+            var ePrev = new EdgeKey(prevV, vertexId);
+            if (ePrev != bevEdgeA && ePrev != bevEdgeB)
+            {
+                Vector3 dir = origPositions[prevV] - pCurr;
+                if (dir.LengthSquared() > 1e-10f)
+                {
+                    return pCurr + (Vector3.Normalize(dir) * width);
+                }
+            }
+
+            var eNext = new EdgeKey(vertexId, nextV);
+            if (eNext != bevEdgeA && eNext != bevEdgeB)
+            {
+                Vector3 dir = origPositions[nextV] - pCurr;
+                if (dir.LengthSquared() > 1e-10f)
+                {
+                    return pCurr + (Vector3.Normalize(dir) * width);
+                }
+            }
+        }
+
+        int faceId = sectorFaces[0];
+        PolygonFace? singleFace = mesh.GetFace(faceId);
+        if (singleFace is null)
+        {
+            return pCurr;
+        }
+
+        int count = singleFace.VertexIds.Count;
+        int vIdx = singleFace.VertexIds.IndexOf(vertexId);
+        if (vIdx < 0)
+        {
+            return pCurr;
+        }
+
+        Vector3 pPrev = origPositions[singleFace.VertexIds[(vIdx - 1 + count) % count]];
+        Vector3 pNext = origPositions[singleFace.VertexIds[(vIdx + 1) % count]];
+        Vector3 normal = origFaceNormals[faceId];
+        Vector3 miter = ComputeInwardMiter(pPrev, pCurr, pNext, normal);
+        return pCurr + (miter * width);
+    }
+
+    private static void EnsureLoopNormalMatches(EditableMesh mesh, List<int> loop, Vector3 expectedNormal)
+    {
+        if (loop.Count < 3 || expectedNormal.LengthSquared() <= 1e-10f)
+        {
+            return;
+        }
+
+        Vector3 newell = Vector3.Zero;
+        for (int i = 0; i < loop.Count; i++)
+        {
+            Vector3 curr = mesh.GetVertex(loop[i])!.Position;
+            Vector3 next = mesh.GetVertex(loop[(i + 1) % loop.Count])!.Position;
+            newell.X += (curr.Y - next.Y) * (curr.Z + next.Z);
+            newell.Y += (curr.Z - next.Z) * (curr.X + next.X);
+            newell.Z += (curr.X - next.X) * (curr.Y + next.Y);
+        }
+
+        if (Vector3.Dot(newell, expectedNormal) < 0.0f)
+        {
+            loop.Reverse();
+        }
+    }
+
     private static List<(int U, int V, string MaterialId)> CollectBoundaryHalfEdges(
         TopologyGraph topology,
         List<PolygonFace> selectedFaces,

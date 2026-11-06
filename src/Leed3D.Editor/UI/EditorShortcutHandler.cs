@@ -27,6 +27,8 @@ public sealed class EditorShortcutHandler
     public bool OpenNormalsPopupRequested { get; set; }
     public bool OpenWeldPopupRequested { get; set; }
     public bool OpenSubdividePopupRequested { get; set; }
+    public bool OpenBevelPopupRequested { get; set; }
+    public bool OpenLoopCutPopupRequested { get; set; }
     public bool OpenMirrorPopupRequested { get; set; }
     public bool OpenLinearArrayPopupRequested { get; set; }
     public bool OpenRadialArrayPopupRequested { get; set; }
@@ -498,6 +500,20 @@ public sealed class EditorShortcutHandler
                     {
                         _app.StatusMessage = $"Selected {(_app.Selection.SelectedFaceIds.Count)} coplanar face(s) (Shift+G).";
                     }
+                    return;
+                }
+
+                // Ctrl+B: Edge Bevel / Chamfer popup
+                if (ctrl && !shift && !alt && _app.Selection.Mode == InteractionMode.Edge && Raylib.IsKeyPressed(KeyboardKey.B))
+                {
+                    OpenBevelPopupRequested = true;
+                    return;
+                }
+
+                // Ctrl+R: Loop Cut popup
+                if (ctrl && !shift && !alt && Raylib.IsKeyPressed(KeyboardKey.R))
+                {
+                    OpenLoopCutPopupRequested = true;
                     return;
                 }
             }

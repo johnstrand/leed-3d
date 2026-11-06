@@ -430,4 +430,69 @@ public class MeshTopologyOpsVertexEdgeTests
         // Collinear valence-2 endpoints on the boundary were also simplified -> clean 4-vertex quad!
         Assert.Equal(4, plane2x1.VertexCount);
     }
+
+    [Fact]
+    public void InsertEdgeLoop_OnBoxQuadRing_SplitsFourQuadsIntoEightAndPreservesClosedManifold()
+    {
+        EditableMesh box = PrimitiveGenerator.CreateBox(new Vector3(4, 4, 4), materialId: "concrete_wall");
+        Assert.Equal(8, box.VertexCount);
+        Assert.Equal(6, box.FaceCount);
+
+        EdgeKey verticalEdge = box.GetTopology().Edges.First(e =>
+        {
+            Vector3 pA = box.GetVertex(e.Key.VMin)!.Position;
+            Vector3 pB = box.GetVertex(e.Key.VMax)!.Position;
+            return MathF.Abs(pA.X - pB.X) < 1e-4f && MathF.Abs(pA.Z - pB.Z) < 1e-4f && MathF.Abs(pA.Y - pB.Y) > 1.0f;
+        }).Key;
+
+        IReadOnlyList<EdgeKey> loopEdges = MeshTopologyOps.InsertEdgeLoop(box, verticalEdge, slideFactor: 0.25f);
+
+        Assert.Equal(4, loopEdges.Count);
+        Assert.Equal(12, box.VertexCount);
+        Assert.Equal(10, box.FaceCount);
+        Assert.True(box.GetTopology().IsClosedManifold());
+
+        // The 4 new loop vertices should all have Y == -1.0 (or +1.0 depending on VMin/VMax orientation)
+        foreach (EdgeKey le in loopEdges)
+        {
+            Vector3 pA = box.GetVertex(le.VMin)!.Position;
+            Vector3 pB = box.GetVertex(le.VMax)!.Position;
+            Assert.Equal(pA.Y, pB.Y, 3);
+            Assert.Equal(1.0f, MathF.Abs(pA.Y), 3);
+        }
+    }
+
+    [Fact]
+    public void BevelEdges_SingleEdgeAndAllCubeEdges_ProduceClosedManifoldMeshes()
+    {
+        // 1. Single edge chamfer (segments = 1) on a cube
+        EditableMesh cubeSingle = PrimitiveGenerator.CreateBox(new Vector3(2, 2, 2), materialId: "trim_mat");
+        EdgeKey oneEdge = cubeSingle.GetTopology().Edges[0].Key;
+        IReadOnlyList<int> chamferFaces = MeshTopologyOps.BevelEdges(cubeSingle, [oneEdge], width: 0.25f, segments: 1);
+
+        Assert.Single(chamferFaces);
+        Assert.Equal(10, cubeSingle.VertexCount);
+        Assert.Equal(7, cubeSingle.FaceCount);
+        Assert.True(cubeSingle.GetTopology().IsClosedManifold());
+
+        // 2. Multi-segment rounded bevel (segments = 3) on a single cube edge
+        EditableMesh cubeRounded = PrimitiveGenerator.CreateBox(new Vector3(2, 2, 2));
+        EdgeKey roundEdge = cubeRounded.GetTopology().Edges[0].Key;
+        IReadOnlyList<int> roundedFaces = MeshTopologyOps.BevelEdges(cubeRounded, [roundEdge], width: 0.3f, segments: 3);
+
+        Assert.Equal(3, roundedFaces.Count);
+        Assert.Equal(14, cubeRounded.VertexCount);
+        Assert.Equal(9, cubeRounded.FaceCount);
+        Assert.True(cubeRounded.GetTopology().IsClosedManifold());
+
+        // 3. All 12 edges of a cube beveled simultaneously (segments = 1 -> 6 faces + 12 edge quads + 8 corner triangles = 26 faces, 24 vertices)
+        EditableMesh cubeAll = PrimitiveGenerator.CreateBox(new Vector3(2, 2, 2));
+        List<EdgeKey> all12Edges = cubeAll.GetTopology().Edges.Select(e => e.Key).ToList();
+        IReadOnlyList<int> allBevelFaces = MeshTopologyOps.BevelEdges(cubeAll, all12Edges, width: 0.2f, segments: 1);
+
+        Assert.Equal(20, allBevelFaces.Count); // 12 edge quads + 8 corner triangles
+        Assert.Equal(24, cubeAll.VertexCount);
+        Assert.Equal(26, cubeAll.FaceCount);
+        Assert.True(cubeAll.GetTopology().IsClosedManifold());
+    }
 }
