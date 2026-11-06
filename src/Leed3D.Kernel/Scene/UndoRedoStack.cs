@@ -13,6 +13,8 @@ public sealed class UndoRedoStack
     private readonly LinkedList<UndoRecord> _undoList = new();
     private readonly LinkedList<UndoRecord> _redoList = new();
     private (string Description, EditorScene Snapshot)? _inProgressTransaction;
+    private UndoRecord? _savedRecord;
+    private bool _isSavedAtInitialState = true;
 
     public int MaxHistory { get; set; }
 
@@ -31,6 +33,23 @@ public sealed class UndoRedoStack
     public int RedoCount => _redoList.Count;
 
     /// <summary>
+    /// Returns true when the current undo history state differs from the state marked by <see cref="MarkSaved"/>
+    /// (or the initial state after construction / <see cref="Clear"/>).
+    /// </summary>
+    public bool HasUnsavedChanges => _isSavedAtInitialState
+        ? _undoList.Count > 0
+        : _savedRecord is null || !ReferenceEquals(_undoList.Last?.Value, _savedRecord);
+
+    /// <summary>
+    /// Marks the current undo history position as the saved state of the document.
+    /// </summary>
+    public void MarkSaved()
+    {
+        _savedRecord = _undoList.Last?.Value;
+        _isSavedAtInitialState = _undoList.Count == 0;
+    }
+
+    /// <summary>
     /// Records a completed discrete action. Clears any redo history.
     /// </summary>
     public void RecordAction(string description, EditorScene sceneBefore, EditorScene sceneAfter)
@@ -46,7 +65,13 @@ public sealed class UndoRedoStack
 
         while (_undoList.Count > MaxHistory)
         {
+            UndoRecord removed = _undoList.First!.Value;
             _undoList.RemoveFirst();
+            _isSavedAtInitialState = false;
+            if (ReferenceEquals(removed, _savedRecord))
+            {
+                _savedRecord = null;
+            }
         }
     }
 
@@ -137,12 +162,14 @@ public sealed class UndoRedoStack
     }
 
     /// <summary>
-    /// Clears both undo and redo histories.
+    /// Clears both undo and redo histories and resets the saved state to the clean initial state.
     /// </summary>
     public void Clear()
     {
         _undoList.Clear();
         _redoList.Clear();
         _inProgressTransaction = null;
+        _savedRecord = null;
+        _isSavedAtInitialState = true;
     }
 }

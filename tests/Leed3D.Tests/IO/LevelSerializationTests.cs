@@ -10,6 +10,7 @@ using Leed3D.Kernel.Math;
 using Leed3D.Kernel.Physics;
 using Leed3D.Kernel.Primitives;
 using Leed3D.Kernel.Scene;
+using Leed3D.Kernel.Selection;
 using Leed3D.Kernel.Texturing;
 using Leed3D.Runtime;
 using Leed3D.Runtime.Metadata;
@@ -354,5 +355,237 @@ public class LevelSerializationTests
         Assert.True(controller.Position.Z <= 4.0f - controller.Config.Radius + 0.02f,
             $"Expected player stopped by wall at Z <= {4.0f - controller.Config.Radius}, got {controller.Position.Z}");
         Assert.True(controller.IsGrounded);
+    }
+
+    [Fact]
+    public void LevelDocumentSession_TryOpenLevel_LoadsValidLevel_ClearsUndoStack_AndSetsCurrentFilePath()
+    {
+        var scene = new EditorScene("InitialScene");
+        var undoStack = new UndoRedoStack();
+        var selection = new SelectionManager();
+        var session = new LevelDocumentSession(scene, undoStack, selection);
+
+        // Perform an edit on the initial scene so UndoStack is non-empty and dirty
+        EditorScene before = scene.CloneSnapshot();
+        SceneObject initialObj = scene.AddMeshObject("InitialCube", PrimitiveGenerator.CreateBox(Vector3.One));
+        selection.SelectSingleObject(initialObj.Id);
+        undoStack.RecordAction("Add InitialCube", before, scene);
+
+        Assert.True(session.HasUnsavedChanges);
+        Assert.True(undoStack.CanUndo);
+        Assert.True(selection.HasSelection);
+
+        // Save a distinct valid level to disk
+        var savedLevel = new EditorScene("OpenedArenaLevel");
+        savedLevel.AddMeshObject("ArenaFloor", PrimitiveGenerator.CreateBox(new Vector3(12f, 1f, 12f)), new Vector3(0f, -0.5f, 0f));
+        savedLevel.AddMeshObject("ArenaPillar", PrimitiveGenerator.CreateBox(new Vector3(1f, 4f, 1f)), new Vector3(3f, 2f, 3f));
+        savedLevel.CreateEntity("player_spawn", "arena_spawn", new Vector3(0f, 0f, -4f));
+
+        string tempPath = Path.Combine(Path.GetTempPath(), $"leed_open_valid_{Guid.NewGuid():N}.level.json");
+        try
+        {
+            LevelSerializer.Save(savedLevel, tempPath);
+
+            bool callbackInvoked = false;
+            bool opened = session.TryOpenLevel(tempPath, out string? error, () => callbackInvoked = true);
+
+            Assert.True(opened);
+            Assert.Null(error);
+            Assert.Null(session.LastErrorMessage);
+            Assert.True(callbackInvoked);
+
+            // Scene replaced with loaded level
+            Assert.Equal("OpenedArenaLevel", scene.Name);
+            Assert.Equal(2, scene.ObjectCount);
+            Assert.Equal(1, scene.EntityCount);
+            Assert.NotNull(scene.GetEntity("arena_spawn"));
+
+            // Active document path updated, selection and undo history cleared, document marked clean
+            Assert.Equal(tempPath, session.CurrentFilePath);
+            Assert.False(session.HasUnsavedChanges);
+            Assert.False(undoStack.CanUndo);
+            Assert.False(undoStack.CanRedo);
+            Assert.False(selection.HasSelection);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                File.Delete(tempPath);
+            }
+        }
+    }
+
+    [Fact]
+    public void LevelDocumentSession_TryOpenLevel_InvalidOrMissingFiles_ReportsError_WithoutReplacingCurrentScene()
+    {
+        var scene = new EditorScene("ProtectedWorkingScene");
+        var undoStack = new UndoRedoStack();
+        var selection = new SelectionManager();
+        var session = new LevelDocumentSession(scene, undoStack, selection)
+        {
+            CurrentFilePath = "existing_work.level.json"
+        };
+
+        EditorScene before = scene.CloneSnapshot();
+        SceneObject workingObj = scene.AddMeshObject("WorkingBrush", PrimitiveGenerator.CreateBox(new Vector3(2f, 2f, 2f)), new Vector3(1f, 2f, 3f));
+        selection.SelectSingleObject(workingObj.Id);
+        undoStack.RecordAction("Add WorkingBrush", before, scene);
+
+        Assert.True(session.HasUnsavedChanges);
+        Assert.Equal(1, undoStack.UndoCount);
+
+        string tempDir = Path.Combine(Path.GetTempPath(), $"leed_invalid_tests_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            // 1. Non-existent file
+            string missingPath = Path.Combine(tempDir, "does_not_exist.level.json");
+            bool callbackCalled = false;
+            Assert.False(session.TryOpenLevel(missingPath, out string? errMissing, () => callbackCalled = true));
+            Assert.False(string.IsNullOrWhiteSpace(errMissing));
+            Assert.False(callbackCalled);
+
+            // 2. Malformed JSON syntax
+            string malformedPath = Path.Combine(tempDir, "malformed.level.json");
+            File.WriteAllText(malformedPath, "{ not valid json ");
+            Assert.False(session.TryOpenLevel(malformedPath, out string? errMalformed, () => callbackCalled = true));
+            Assert.False(string.IsNullOrWhiteSpace(errMalformed));
+            Assert.False(callbackCalled);
+
+            // 3. Unrelated JSON object missing 'editor' and 'baked' sections
+            string unrelatedJsonPath = Path.Combine(tempDir, "unrelated.level.json");
+            File.WriteAllText(unrelatedJsonPath, "{ \"foo\": \"bar\", \"count\": 42 }");
+            Assert.False(session.TryOpenLevel(unrelatedJsonPath, out string? errUnrelated, () => callbackCalled = true));
+            Assert.False(string.IsNullOrWhiteSpace(errUnrelated));
+            Assert.False(callbackCalled);
+
+            // 4. Unsupported formatVersion
+            string badVersionPath = Path.Combine(tempDir, "bad_version.level.json");
+            File.WriteAllText(badVersionPath, "{ \"formatVersion\": 999, \"editor\": { \"objects\": [], \"entities\": [] }, \"baked\": {} }");
+            Assert.False(session.TryOpenLevel(badVersionPath, out string? errVersion, () => callbackCalled = true));
+            Assert.False(string.IsNullOrWhiteSpace(errVersion));
+            Assert.False(callbackCalled);
+
+            // 5. Corrupt mesh topology (face referencing non-existent vertex ID)
+            string corruptMeshPath = Path.Combine(tempDir, "corrupt_mesh.level.json");
+            File.WriteAllText(corruptMeshPath, """
+            {
+              "formatVersion": 1,
+              "name": "CorruptMesh",
+              "editor": {
+                "objects": [
+                  {
+                    "id": 1,
+                    "name": "BrokenObj",
+                    "transform": { "position": [0,0,0], "rotationEulerDegrees": [0,0,0], "scale": [1,1,1] },
+                    "mesh": {
+                      "vertices": [
+                        { "id": 1, "position": [0,0,0] },
+                        { "id": 2, "position": [1,0,0] },
+                        { "id": 3, "position": [0,1,0] }
+                      ],
+                      "faces": [
+                        { "id": 1, "vertexIds": [1, 2, 999], "materialId": "dev_grid_gray" }
+                      ],
+                      "edges": []
+                    }
+                  }
+                ],
+                "entities": []
+              },
+              "baked": {}
+            }
+            """);
+            Assert.False(session.TryOpenLevel(corruptMeshPath, out string? errCorrupt, () => callbackCalled = true));
+            Assert.False(string.IsNullOrWhiteSpace(errCorrupt));
+            Assert.False(callbackCalled);
+
+            // Verify current scene, selection, undo history, dirty state, and active path were completely preserved
+            Assert.Equal("ProtectedWorkingScene", scene.Name);
+            Assert.Equal(1, scene.ObjectCount);
+            Assert.NotNull(scene.GetObject(workingObj.Id));
+            Assert.Equal("existing_work.level.json", session.CurrentFilePath);
+            Assert.True(session.HasUnsavedChanges);
+            Assert.Equal(1, undoStack.UndoCount);
+            Assert.Contains(workingObj.Id, selection.SelectedObjectIds);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void LevelDocumentSession_OpenAndCoordinateWithSaveAndSaveAs_UpdatesActiveDocumentPathAndDirtyState()
+    {
+        string tempDir = Path.Combine(Path.GetTempPath(), $"leed_save_coord_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        string pathA = Path.Combine(tempDir, "level_a.level.json");
+        string pathB = Path.Combine(tempDir, "level_b.level.json");
+
+        try
+        {
+            var initialDiskScene = new EditorScene("LevelA");
+            initialDiskScene.AddMeshObject("BaseFloor", PrimitiveGenerator.CreateBox(new Vector3(8f, 1f, 8f)));
+            LevelSerializer.Save(initialDiskScene, pathA);
+
+            var scene = new EditorScene("Untitled Level");
+            var undoStack = new UndoRedoStack();
+            var selection = new SelectionManager();
+            var session = new LevelDocumentSession(scene, undoStack, selection);
+
+            // 1. Open LevelA -> becomes active document path, clean state
+            Assert.True(session.TryOpenLevel(pathA, out _));
+            Assert.Equal(pathA, session.CurrentFilePath);
+            Assert.False(session.HasUnsavedChanges);
+
+            // 2. Edit scene -> dirty state becomes true
+            EditorScene beforeAdd = scene.CloneSnapshot();
+            scene.AddMeshObject("AddedCrate", PrimitiveGenerator.CreateBox(Vector3.One), new Vector3(0f, 1f, 0f));
+            undoStack.RecordAction("Add Crate", beforeAdd, scene);
+            Assert.True(session.HasUnsavedChanges);
+
+            // 3. Save (without specifying path) -> writes to active CurrentFilePath (pathA) and clears dirty state
+            Assert.True(session.TrySaveLevel(out string? saveErr));
+            Assert.Null(saveErr);
+            Assert.False(session.HasUnsavedChanges);
+            Assert.Equal(pathA, session.CurrentFilePath);
+
+            EditorScene reloadedA = LevelSerializer.LoadEditorScene(pathA);
+            Assert.Equal(2, reloadedA.ObjectCount);
+
+            // 4. Undo edit and perform a different edit at the same UndoCount -> must still be detected as dirty!
+            Assert.True(undoStack.Undo(scene));
+            Assert.True(session.HasUnsavedChanges);
+
+            EditorScene beforeAlt = scene.CloneSnapshot();
+            scene.CreateEntity("light", "new_sun_light", new Vector3(0f, 10f, 0f));
+            undoStack.RecordAction("Add Light", beforeAlt, scene);
+            Assert.Equal(1, undoStack.UndoCount);
+            Assert.True(session.HasUnsavedChanges);
+
+            // 5. Save As to pathB -> updates CurrentFilePath to pathB and clears dirty state
+            Assert.True(session.TrySaveLevelAs(pathB, out string? saveAsErr));
+            Assert.Null(saveAsErr);
+            Assert.Equal(pathB, session.CurrentFilePath);
+            Assert.False(session.HasUnsavedChanges);
+
+            EditorScene reloadedB = LevelSerializer.LoadEditorScene(pathB);
+            Assert.Equal(1, reloadedB.ObjectCount);
+            Assert.Equal(1, reloadedB.EntityCount);
+            Assert.NotNull(reloadedB.GetEntity("new_sun_light"));
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
     }
 }

@@ -155,34 +155,105 @@ public static class LevelSerializer
     {
         ArgumentNullException.ThrowIfNull(document);
 
-        var scene = new EditorScene(document.Name);
+        if (document.FormatVersion < 1 || document.FormatVersion > LeedLevelDocument.CurrentFormatVersion)
+        {
+            throw new InvalidDataException(
+                $"Unsupported level format version: {document.FormatVersion}. Expected version {LeedLevelDocument.CurrentFormatVersion}.");
+        }
+
+        if (document.Editor is null || document.Editor.Objects is null || document.Editor.Entities is null)
+        {
+            throw new InvalidDataException("Invalid level file: missing 'editor' layer data.");
+        }
+
+        var scene = new EditorScene(string.IsNullOrWhiteSpace(document.Name) ? "Untitled" : document.Name);
+        var seenObjectIds = new HashSet<int>();
 
         // 1. Reconstruct Objects
         for (int i = 0; i < document.Editor.Objects.Count; i++)
         {
-            EditorObjectDto objDto = document.Editor.Objects[i];
+            EditorObjectDto? objDto = document.Editor.Objects[i];
+            if (objDto is null)
+            {
+                throw new InvalidDataException($"Invalid level file: object at index {i} is null.");
+            }
+
+            if (objDto.Transform is null)
+            {
+                throw new InvalidDataException($"Invalid level file: object '{objDto.Name}' (ID {objDto.Id}) is missing a transform.");
+            }
+
+            if (!seenObjectIds.Add(objDto.Id))
+            {
+                throw new InvalidDataException($"Invalid level file: duplicate object ID {objDto.Id}.");
+            }
+
             EditableMesh? mesh = null;
 
             if (objDto.Mesh is not null)
             {
+                if (objDto.Mesh.Vertices is null || objDto.Mesh.Faces is null || objDto.Mesh.Edges is null)
+                {
+                    throw new InvalidDataException($"Invalid level file: object '{objDto.Name}' (ID {objDto.Id}) has an invalid mesh definition.");
+                }
+
                 mesh = new EditableMesh();
+                var seenVertexIds = new HashSet<int>();
 
                 for (int vIdx = 0; vIdx < objDto.Mesh.Vertices.Count; vIdx++)
                 {
-                    EditorVertexDto vDto = objDto.Mesh.Vertices[vIdx];
+                    EditorVertexDto? vDto = objDto.Mesh.Vertices[vIdx];
+                    if (vDto is null)
+                    {
+                        throw new InvalidDataException($"Invalid level file: vertex at index {vIdx} in object '{objDto.Name}' is null.");
+                    }
+
+                    if (!seenVertexIds.Add(vDto.Id))
+                    {
+                        throw new InvalidDataException($"Invalid level file: duplicate vertex ID {vDto.Id} in object '{objDto.Name}'.");
+                    }
+
+                    if (!float.IsFinite(vDto.Position.X) || !float.IsFinite(vDto.Position.Y) || !float.IsFinite(vDto.Position.Z))
+                    {
+                        throw new InvalidDataException($"Invalid level file: vertex {vDto.Id} in object '{objDto.Name}' has non-finite coordinates.");
+                    }
+
                     mesh.AddVertexWithId(vDto.Id, vDto.Position, vDto.Metadata?.Clone());
                 }
 
+                var seenFaceIds = new HashSet<int>();
+
                 for (int fIdx = 0; fIdx < objDto.Mesh.Faces.Count; fIdx++)
                 {
-                    PolygonFaceDto fDto = objDto.Mesh.Faces[fIdx];
+                    PolygonFaceDto? fDto = objDto.Mesh.Faces[fIdx];
+                    if (fDto is null || fDto.VertexIds is null || fDto.VertexIds.Count < 3)
+                    {
+                        throw new InvalidDataException($"Invalid level file: face at index {fIdx} in object '{objDto.Name}' must have at least 3 vertices.");
+                    }
+
+                    if (!seenFaceIds.Add(fDto.Id))
+                    {
+                        throw new InvalidDataException($"Invalid level file: duplicate face ID {fDto.Id} in object '{objDto.Name}'.");
+                    }
+
+                    for (int vRefIdx = 0; vRefIdx < fDto.VertexIds.Count; vRefIdx++)
+                    {
+                        int vId = fDto.VertexIds[vRefIdx];
+                        if (!seenVertexIds.Contains(vId))
+                        {
+                            throw new InvalidDataException(
+                                $"Invalid level file: face {fDto.Id} in object '{objDto.Name}' references non-existent vertex ID {vId}.");
+                        }
+                    }
+
+                    FaceUvMappingDto uvDto = fDto.UvMapping ?? new FaceUvMappingDto();
                     var uvMapping = new FaceUvMapping(
-                        fDto.UvMapping.UAxis,
-                        fDto.UvMapping.VAxis,
-                        fDto.UvMapping.Offset,
-                        fDto.UvMapping.Scale,
-                        fDto.UvMapping.RotationDegrees,
-                        fDto.UvMapping.TextureLock);
+                        uvDto.UAxis,
+                        uvDto.VAxis,
+                        uvDto.Offset,
+                        uvDto.Scale,
+                        uvDto.RotationDegrees,
+                        uvDto.TextureLock);
 
                     mesh.AddFaceWithId(
                         fDto.Id,
@@ -201,9 +272,17 @@ public static class LevelSerializer
 
                 for (int eIdx = 0; eIdx < objDto.Mesh.Edges.Count; eIdx++)
                 {
-                    EdgeMetadataDto eDto = objDto.Mesh.Edges[eIdx];
+                    EdgeMetadataDto? eDto = objDto.Mesh.Edges[eIdx];
+                    if (eDto is null || eDto.V0 == eDto.V1)
+                    {
+                        continue;
+                    }
+
                     var ek = new EdgeKey(eDto.V0, eDto.V1);
-                    mesh.EdgeMetadata[ek] = eDto.Metadata.Clone();
+                    if (eDto.Metadata is not null)
+                    {
+                        mesh.EdgeMetadata[ek] = eDto.Metadata.Clone();
+                    }
                 }
             }
 
@@ -214,10 +293,10 @@ public static class LevelSerializer
 
             var sceneObj = new SceneObject(
                 objDto.Id,
-                objDto.Name,
+                string.IsNullOrWhiteSpace(objDto.Name) ? "Object" : objDto.Name,
                 mesh,
                 transform,
-                objDto.Metadata.Clone())
+                objDto.Metadata?.Clone())
             {
                 Visible = objDto.Visible,
                 Locked = objDto.Locked
@@ -226,10 +305,27 @@ public static class LevelSerializer
             scene.AddObject(sceneObj);
         }
 
+        var seenEntityIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         // 2. Reconstruct Entities
         for (int i = 0; i < document.Editor.Entities.Count; i++)
         {
-            LevelEntityDto entDto = document.Editor.Entities[i];
+            LevelEntityDto? entDto = document.Editor.Entities[i];
+            if (entDto is null || string.IsNullOrWhiteSpace(entDto.Id) || string.IsNullOrWhiteSpace(entDto.ClassName))
+            {
+                throw new InvalidDataException($"Invalid level file: entity at index {i} is missing an ID or className.");
+            }
+
+            if (entDto.Transform is null)
+            {
+                throw new InvalidDataException($"Invalid level file: entity '{entDto.Id}' is missing a transform.");
+            }
+
+            if (!seenEntityIds.Add(entDto.Id))
+            {
+                throw new InvalidDataException($"Invalid level file: duplicate entity ID '{entDto.Id}'.");
+            }
+
             var transform = new Transform3D(
                 entDto.Transform.Position,
                 entDto.Transform.RotationEulerDegrees,
@@ -239,7 +335,7 @@ public static class LevelSerializer
                 entDto.Id,
                 entDto.ClassName,
                 transform,
-                entDto.Properties.Clone())
+                entDto.Properties?.Clone())
             {
                 Visible = entDto.Visible,
                 Locked = entDto.Locked

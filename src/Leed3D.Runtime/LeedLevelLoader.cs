@@ -55,8 +55,8 @@ public static class LeedLevelLoader
     public static LeedLevelDocument Load(Stream stream, JsonSerializerOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(stream);
-        var doc = JsonSerializer.Deserialize<LeedLevelDocument>(stream, options ?? DefaultOptions);
-        return doc ?? throw new InvalidDataException("Failed to deserialize LeedLevelDocument: JSON root was null.");
+        using var jsonDoc = JsonDocument.Parse(stream, CreateDocumentParseOptions(options));
+        return DeserializeAndValidate(jsonDoc.RootElement, options);
     }
 
     /// <summary>
@@ -65,8 +65,8 @@ public static class LeedLevelLoader
     public static LeedLevelDocument LoadFromJson(string json, JsonSerializerOptions? options = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(json);
-        var doc = JsonSerializer.Deserialize<LeedLevelDocument>(json, options ?? DefaultOptions);
-        return doc ?? throw new InvalidDataException("Failed to deserialize LeedLevelDocument: JSON root was null.");
+        using var jsonDoc = JsonDocument.Parse(json, CreateDocumentParseOptions(options));
+        return DeserializeAndValidate(jsonDoc.RootElement, options);
     }
 
     /// <summary>
@@ -75,8 +75,8 @@ public static class LeedLevelLoader
     public static async Task<LeedLevelDocument> LoadAsync(Stream stream, JsonSerializerOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(stream);
-        var doc = await JsonSerializer.DeserializeAsync<LeedLevelDocument>(stream, options ?? DefaultOptions, cancellationToken);
-        return doc ?? throw new InvalidDataException("Failed to deserialize LeedLevelDocument: JSON root was null.");
+        using var jsonDoc = await JsonDocument.ParseAsync(stream, CreateDocumentParseOptions(options), cancellationToken);
+        return DeserializeAndValidate(jsonDoc.RootElement, options);
     }
 
     /// <summary>
@@ -119,5 +119,76 @@ public static class LeedLevelLoader
     {
         ArgumentNullException.ThrowIfNull(document);
         return JsonSerializer.Serialize(document, options ?? DefaultOptions);
+    }
+
+    private static JsonDocumentOptions CreateDocumentParseOptions(JsonSerializerOptions? options)
+    {
+        JsonSerializerOptions effective = options ?? DefaultOptions;
+        return new JsonDocumentOptions
+        {
+            CommentHandling = effective.ReadCommentHandling,
+            AllowTrailingCommas = effective.AllowTrailingCommas,
+            MaxDepth = effective.MaxDepth
+        };
+    }
+
+    private static LeedLevelDocument DeserializeAndValidate(JsonElement root, JsonSerializerOptions? options)
+    {
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException($"Invalid level file: expected JSON object root, found {root.ValueKind}.");
+        }
+
+        bool hasEditor = false;
+        bool hasBaked = false;
+
+        foreach (JsonProperty prop in root.EnumerateObject())
+        {
+            if (prop.Name.Equals("editor", StringComparison.OrdinalIgnoreCase))
+            {
+                if (prop.Value.ValueKind != JsonValueKind.Object)
+                {
+                    throw new InvalidDataException("Invalid level file: 'editor' section must be a JSON object.");
+                }
+                hasEditor = true;
+            }
+            else if (prop.Name.Equals("baked", StringComparison.OrdinalIgnoreCase))
+            {
+                if (prop.Value.ValueKind != JsonValueKind.Object)
+                {
+                    throw new InvalidDataException("Invalid level file: 'baked' section must be a JSON object.");
+                }
+                hasBaked = true;
+            }
+        }
+
+        if (!hasEditor && !hasBaked)
+        {
+            throw new InvalidDataException("Invalid level file: JSON root must contain an 'editor' or 'baked' section.");
+        }
+
+        LeedLevelDocument? doc = root.Deserialize<LeedLevelDocument>(options ?? DefaultOptions);
+        if (doc is null)
+        {
+            throw new InvalidDataException("Failed to deserialize LeedLevelDocument: JSON root was null.");
+        }
+
+        if (doc.FormatVersion < 1 || doc.FormatVersion > LeedLevelDocument.CurrentFormatVersion)
+        {
+            throw new InvalidDataException(
+                $"Unsupported level format version: {doc.FormatVersion}. Expected version {LeedLevelDocument.CurrentFormatVersion}.");
+        }
+
+        if (doc.Editor is null)
+        {
+            throw new InvalidDataException("Invalid level file: 'editor' section cannot be null.");
+        }
+
+        if (doc.Baked is null)
+        {
+            throw new InvalidDataException("Invalid level file: 'baked' section cannot be null.");
+        }
+
+        return doc;
     }
 }
