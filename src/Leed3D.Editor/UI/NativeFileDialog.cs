@@ -13,6 +13,7 @@ public static class NativeFileDialog
 
     // Win32 OPENFILENAME flags
     private const int OFN_READONLY = 0x00000001;
+    private const int OFN_OVERWRITEPROMPT = 0x00000002;
     private const int OFN_HIDEREADONLY = 0x00000004;
     private const int OFN_NOCHANGEDIR = 0x00000008;
     private const int OFN_PATHMUSTEXIST = 0x00000800;
@@ -51,6 +52,63 @@ public static class NativeFileDialog
         if (OperatingSystem.IsLinux())
         {
             return TryShowLinuxOpenDialog("Open Level (.level.json)", resolvedInitialDir, out selectedPath);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Attempts to open the native OS Save As dialog for choosing a destination <c>.level.json</c> file.
+    /// </summary>
+    /// <param name="initialFilePath">Optional initial file path or filename to pre-populate.</param>
+    /// <param name="ownerWindowHandle">Optional native window handle (HWND on Windows).</param>
+    /// <param name="selectedPath">Receives the chosen destination file path, or <c>null</c> if the user cancelled.</param>
+    /// <returns><c>true</c> if a native system dialog was supported and shown (even if cancelled by the user); <c>false</c> if unavailable on the host environment.</returns>
+    public static bool TryShowSaveLevelDialog(string? initialFilePath, nint ownerWindowHandle, out string? selectedPath)
+    {
+        selectedPath = null;
+
+        string? initialDir = null;
+        string defaultFileName = "my_level.level.json";
+
+        if (!string.IsNullOrWhiteSpace(initialFilePath))
+        {
+            try
+            {
+                string? dir = Path.GetDirectoryName(initialFilePath);
+                initialDir = ResolveExistingDirectory(dir);
+                string fileName = Path.GetFileName(initialFilePath);
+                if (!string.IsNullOrWhiteSpace(fileName))
+                {
+                    defaultFileName = fileName;
+                }
+            }
+            catch
+            {
+                // Ignore invalid initial path
+            }
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            return TryShowWindowsSaveDialog(
+                title: "Save Level As (.level.json)",
+                filter: "Leed3D Level Files (*.level.json)\0*.level.json\0JSON Files (*.json)\0*.json\0All Files (*.*)\0*.*\0\0",
+                defaultExt: "level.json",
+                initialDirectory: initialDir,
+                defaultFileName: defaultFileName,
+                ownerWindowHandle: ownerWindowHandle,
+                out selectedPath);
+        }
+
+        if (OperatingSystem.IsMacOS())
+        {
+            return TryShowMacSaveDialog("Save Level As (.level.json)", initialDir, defaultFileName, out selectedPath);
+        }
+
+        if (OperatingSystem.IsLinux())
+        {
+            return TryShowLinuxSaveDialog("Save Level As (.level.json)", initialDir, defaultFileName, out selectedPath);
         }
 
         return false;
@@ -258,6 +316,200 @@ public static class NativeFileDialog
         return value.Replace("\\", "\\\\").Replace("\"", "\\\"");
     }
 
+    private static bool TryShowWindowsSaveDialog(
+        string title,
+        string filter,
+        string defaultExt,
+        string? initialDirectory,
+        string defaultFileName,
+        nint ownerWindowHandle,
+        out string? selectedPath)
+    {
+        selectedPath = null;
+        string savedCurrentDir = Environment.CurrentDirectory;
+        nint fileBuffer = Marshal.AllocHGlobal(MaxFileBufferChars * sizeof(char));
+
+        try
+        {
+            string seedName = string.IsNullOrWhiteSpace(defaultFileName) ? "my_level.level.json" : defaultFileName;
+            if (seedName.Length >= MaxFileBufferChars)
+            {
+                seedName = seedName[..(MaxFileBufferChars - 1)];
+            }
+
+            char[] chars = seedName.ToCharArray();
+            Marshal.Copy(chars, 0, fileBuffer, chars.Length);
+            Marshal.WriteInt16(fileBuffer, chars.Length * sizeof(char), 0);
+
+            var ofn = new OPENFILENAMEW
+            {
+                lStructSize = Marshal.SizeOf<OPENFILENAMEW>(),
+                hwndOwner = ownerWindowHandle,
+                lpstrFilter = filter,
+                nFilterIndex = 1,
+                lpstrFile = fileBuffer,
+                nMaxFile = MaxFileBufferChars,
+                lpstrInitialDir = initialDirectory,
+                lpstrTitle = title,
+                lpstrDefExt = defaultExt,
+                Flags = OFN_EXPLORER | OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT | OFN_HIDEREADONLY | OFN_NOCHANGEDIR
+            };
+
+            bool accepted = GetSaveFileNameW(ref ofn);
+            if (accepted)
+            {
+                string? result = Marshal.PtrToStringUni(fileBuffer);
+                if (!string.IsNullOrWhiteSpace(result))
+                {
+                    selectedPath = result;
+                }
+            }
+
+            return true;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(fileBuffer);
+            try
+            {
+                Environment.CurrentDirectory = savedCurrentDir;
+            }
+            catch
+            {
+                // Ignore if savedCurrentDir is no longer accessible
+            }
+        }
+    }
+
+    private static bool TryShowMacSaveDialog(
+        string title,
+        string? initialDirectory,
+        string defaultFileName,
+        out string? selectedPath)
+    {
+        selectedPath = null;
+        try
+        {
+            string defaultLocationClause = !string.IsNullOrWhiteSpace(initialDirectory)
+                ? $" default location (POSIX file \"{EscapeAppleScriptString(initialDirectory)}\")"
+                : string.Empty;
+
+            string script =
+                $"POSIX path of (choose file name with prompt \"{EscapeAppleScriptString(title)}\" default name \"{EscapeAppleScriptString(defaultFileName)}\"{defaultLocationClause})";
+            using var proc = Process.Start(new ProcessStartInfo
+            {
+                FileName = "osascript",
+                ArgumentList = { "-e", script },
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            });
+
+            if (proc is null)
+            {
+                return false;
+            }
+
+            string output = proc.StandardOutput.ReadToEnd().Trim();
+            proc.WaitForExit();
+
+            if (proc.ExitCode == 0 && !string.IsNullOrWhiteSpace(output))
+            {
+                selectedPath = output;
+            }
+
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryShowLinuxSaveDialog(
+        string title,
+        string? initialDirectory,
+        string defaultFileName,
+        out string? selectedPath)
+    {
+        selectedPath = null;
+        string initialTarget = !string.IsNullOrWhiteSpace(initialDirectory)
+            ? Path.Combine(initialDirectory, defaultFileName)
+            : defaultFileName;
+
+        // 1. Try zenity
+        try
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "zenity",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            startInfo.ArgumentList.Add("--file-selection");
+            startInfo.ArgumentList.Add("--save");
+            startInfo.ArgumentList.Add("--confirm-overwrite");
+            startInfo.ArgumentList.Add($"--title={title}");
+            startInfo.ArgumentList.Add($"--filename={initialTarget}");
+            startInfo.ArgumentList.Add("--file-filter=Leed3D Level Files (*.level.json *.json) | *.level.json *.json");
+            startInfo.ArgumentList.Add("--file-filter=All Files | *");
+
+            using var proc = Process.Start(startInfo);
+            if (proc is not null)
+            {
+                string output = proc.StandardOutput.ReadToEnd().Trim();
+                proc.WaitForExit();
+                if (proc.ExitCode == 0 && !string.IsNullOrWhiteSpace(output))
+                {
+                    selectedPath = output;
+                }
+                return true;
+            }
+        }
+        catch
+        {
+            // Fall through to kdialog
+        }
+
+        // 2. Try kdialog
+        try
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "kdialog",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            startInfo.ArgumentList.Add("--getsavefilename");
+            startInfo.ArgumentList.Add(initialTarget);
+            startInfo.ArgumentList.Add("*.level.json *.json|Leed3D Level Files");
+            startInfo.ArgumentList.Add($"--title={title}");
+
+            using var proc = Process.Start(startInfo);
+            if (proc is not null)
+            {
+                string output = proc.StandardOutput.ReadToEnd().Trim();
+                proc.WaitForExit();
+                if (proc.ExitCode == 0 && !string.IsNullOrWhiteSpace(output))
+                {
+                    selectedPath = output;
+                }
+                return true;
+            }
+        }
+        catch
+        {
+            // Neither zenity nor kdialog available
+        }
+
+        return false;
+    }
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct OPENFILENAMEW
     {
@@ -289,4 +541,8 @@ public static class NativeFileDialog
     [DllImport("comdlg32.dll", EntryPoint = "GetOpenFileNameW", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetOpenFileNameW(ref OPENFILENAMEW lpofn);
+
+    [DllImport("comdlg32.dll", EntryPoint = "GetSaveFileNameW", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetSaveFileNameW(ref OPENFILENAMEW lpofn);
 }

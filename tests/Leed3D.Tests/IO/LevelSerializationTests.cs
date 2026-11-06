@@ -576,9 +576,58 @@ public class LevelSerializationTests
             Assert.False(session.HasUnsavedChanges);
 
             EditorScene reloadedB = LevelSerializer.LoadEditorScene(pathB);
+            Assert.Equal("level_b", reloadedB.Name);
             Assert.Equal(1, reloadedB.ObjectCount);
             Assert.Equal(1, reloadedB.EntityCount);
             Assert.NotNull(reloadedB.GetEntity("new_sun_light"));
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void LevelDocumentSession_SaveAs_NormalizesExtension_UpdatesSceneName_AndPreservesStateOnFailure()
+    {
+        string tempDir = Path.Combine(Path.GetTempPath(), $"leed_saveas_ext_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        try
+        {
+            var scene = new EditorScene("InitialName");
+            scene.AddMeshObject("Cube", PrimitiveGenerator.CreateBox(Vector3.One));
+            var undoStack = new UndoRedoStack();
+            var selection = new SelectionManager();
+            var session = new LevelDocumentSession(scene, undoStack, selection);
+
+            // 1. TrySaveLevel without CurrentFilePath fails cleanly
+            Assert.False(session.TrySaveLevel(out string? noPathErr));
+            Assert.False(string.IsNullOrWhiteSpace(noPathErr));
+
+            // 2. TrySaveLevelAs without extension appends .level.json and updates Scene.Name
+            string rawPathWithoutExt = Path.Combine(tempDir, "catacombs_sector_1");
+            string expectedFullPath = rawPathWithoutExt + ".level.json";
+
+            bool beforeSaveInvoked = false;
+            Assert.True(session.TrySaveLevelAs(rawPathWithoutExt, out string? saveErr, beforeSave: () => beforeSaveInvoked = true));
+            Assert.Null(saveErr);
+            Assert.True(beforeSaveInvoked);
+            Assert.Equal(expectedFullPath, session.CurrentFilePath);
+            Assert.Equal("catacombs_sector_1", scene.Name);
+            Assert.True(File.Exists(expectedFullPath));
+
+            // 3. Failed Save As (e.g. directory path used as file path) preserves previous Scene.Name and CurrentFilePath
+            string existingSubDir = Path.Combine(tempDir, "already_a_directory.level.json");
+            Directory.CreateDirectory(existingSubDir);
+
+            Assert.False(session.TrySaveLevelAs(existingSubDir, out string? ioErr));
+            Assert.False(string.IsNullOrWhiteSpace(ioErr));
+            Assert.Equal("catacombs_sector_1", scene.Name);
+            Assert.Equal(expectedFullPath, session.CurrentFilePath);
         }
         finally
         {

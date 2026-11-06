@@ -65,6 +65,7 @@ public sealed class EditorApp : IDisposable
 
     public LevelDocumentSession DocumentSession { get; }
     public Func<string?, (bool Supported, string? SelectedPath)> OpenFileDialogProvider { get; set; }
+    public Func<string?, (bool Supported, string? SelectedPath)> SaveFileDialogProvider { get; set; }
 
     public string? CurrentFilePath
     {
@@ -74,6 +75,7 @@ public sealed class EditorApp : IDisposable
 
     public bool HasUnsavedChanges => DocumentSession.HasUnsavedChanges;
     public string? LastLoadError => DocumentSession.LastErrorMessage;
+    public string? LastSaveError => _saveLevelErrorMessage ?? DocumentSession.LastErrorMessage;
 
     private enum PendingDocumentAction
     {
@@ -90,9 +92,11 @@ public sealed class EditorApp : IDisposable
     private bool _openOpenLevelModal;
     private bool _openOpenLevelErrorModal;
     private bool _openSaveLevelAsModal;
+    private bool _openSaveLevelErrorModal;
     private bool _openExportObjModal;
     private bool _openExportGltfModal;
     private string? _openLevelErrorMessage;
+    private string? _saveLevelErrorMessage;
 
     private string _openLevelPath = "samples/temple_blockout.level.json";
     private string _saveAsLevelPath = "my_level.level.json";
@@ -328,6 +332,12 @@ public sealed class EditorApp : IDisposable
         {
             nint hwnd = GetNativeWindowHandle();
             bool supported = NativeFileDialog.TryShowOpenLevelDialog(initialDir, hwnd, out string? selectedPath);
+            return (supported, selectedPath);
+        };
+        SaveFileDialogProvider = initialFilePath =>
+        {
+            nint hwnd = GetNativeWindowHandle();
+            bool supported = NativeFileDialog.TryShowSaveLevelDialog(initialFilePath, hwnd, out string? selectedPath);
             return (supported, selectedPath);
         };
         TextureCache = new EditorTextureCache(MaterialLibrary);
@@ -2321,41 +2331,108 @@ public sealed class EditorApp : IDisposable
         return true;
     }
 
-    public void SaveLevel()
+    public bool SaveLevel()
     {
         if (!string.IsNullOrWhiteSpace(CurrentFilePath))
         {
-            SaveLevelAs(CurrentFilePath);
+            if (!DocumentSession.TrySaveLevel(out string? errorMessage, bakeRightHandedRuntime: false, CancelActiveOperationsBeforeSceneChange))
+            {
+                _saveLevelErrorMessage = errorMessage ?? "Failed to save level file.";
+                StatusMessage = _saveLevelErrorMessage;
+                _openSaveLevelErrorModal = true;
+                return false;
+            }
+
+            string activePath = CurrentFilePath;
+            _openLevelPath = activePath;
+            _saveAsLevelPath = activePath;
+            _saveLevelErrorMessage = null;
+            StatusMessage = $"Saved level to {activePath}.";
+            return true;
         }
-        else
-        {
-            PromptSaveLevelAs();
-        }
+
+        PromptSaveLevelAs();
+        return !HasUnsavedChanges;
     }
 
     public void PromptSaveLevelAs()
     {
+        SaveLevelAsFromDialog();
+    }
+
+    public void SaveLevelAsFromDialog()
+    {
+        _isMouseDownInViewport = false;
+        _isDraggingMarquee = false;
+
+        string defaultPath = GetDefaultSaveFilePath();
+        _saveAsLevelPath = defaultPath;
+
+        (bool supported, string? selectedPath) = SaveFileDialogProvider(defaultPath);
+
+        if (!supported)
+        {
+            _saveLevelErrorMessage = null;
+            _openSaveLevelAsModal = true;
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(selectedPath))
+        {
+            _pendingActionAfterSaveAs = PendingDocumentAction.None;
+            return;
+        }
+
+        if (SaveLevelAs(selectedPath))
+        {
+            ExecutePendingActionAfterSave();
+        }
+        else
+        {
+            _pendingActionAfterSaveAs = PendingDocumentAction.None;
+        }
+    }
+
+    private string GetDefaultSaveFilePath()
+    {
         if (!string.IsNullOrWhiteSpace(CurrentFilePath))
         {
-            _saveAsLevelPath = CurrentFilePath;
+            return CurrentFilePath;
         }
-        _openSaveLevelAsModal = true;
+
+        string safeName = string.IsNullOrWhiteSpace(Scene.Name) ? "my_level" : Scene.Name.Trim();
+        foreach (char invalid in Path.GetInvalidFileNameChars())
+        {
+            safeName = safeName.Replace(invalid, '_');
+        }
+        safeName = safeName.Replace(' ', '_').ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(safeName))
+        {
+            safeName = "my_level";
+        }
+
+        return LevelDocumentSession.NormalizeLevelFilePath(safeName);
     }
 
     public bool SaveLevelAs(string filePath)
     {
-        if (!DocumentSession.TrySaveLevelAs(filePath, out string? errorMessage, bakeRightHandedRuntime: false))
+        if (!DocumentSession.TrySaveLevelAs(
+                filePath,
+                out string? errorMessage,
+                bakeRightHandedRuntime: false,
+                updateSceneName: true,
+                CancelActiveOperationsBeforeSceneChange))
         {
-            if (!string.IsNullOrWhiteSpace(errorMessage))
-            {
-                StatusMessage = errorMessage;
-            }
+            _saveLevelErrorMessage = errorMessage ?? "Failed to save level file.";
+            StatusMessage = _saveLevelErrorMessage;
+            _openSaveLevelErrorModal = true;
             return false;
         }
 
-        string activePath = CurrentFilePath ?? filePath.Trim();
+        string activePath = CurrentFilePath ?? LevelDocumentSession.NormalizeLevelFilePath(filePath);
         _openLevelPath = activePath;
         _saveAsLevelPath = activePath;
+        _saveLevelErrorMessage = null;
         StatusMessage = $"Saved level to {activePath}.";
         return true;
     }
@@ -2444,6 +2521,11 @@ public sealed class EditorApp : IDisposable
             ImGui.OpenPopup("Save Level As (.level.json)##SaveLevelAsModal");
             _openSaveLevelAsModal = false;
         }
+        if (_openSaveLevelErrorModal)
+        {
+            ImGui.OpenPopup("Failed to Save Level##SaveLevelErrorModal");
+            _openSaveLevelErrorModal = false;
+        }
         if (_openExportObjModal)
         {
             ImGui.OpenPopup("Export Wavefront .obj##ExportObjModal");
@@ -2461,6 +2543,7 @@ public sealed class EditorApp : IDisposable
         DrawOpenLevelModal();
         DrawOpenLevelErrorModal();
         DrawSaveLevelAsModal();
+        DrawSaveLevelErrorModal();
         DrawExportObjModal();
         DrawExportGltfModal();
     }
@@ -2695,6 +2778,13 @@ public sealed class EditorApp : IDisposable
             ImGui.SetNextItemWidth(400);
             ImGui.InputText("Destination File##SaveAsInput", ref _saveAsLevelPath, 256);
 
+            if (!string.IsNullOrWhiteSpace(_saveLevelErrorMessage))
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1.0f, 0.38f, 0.38f, 1.0f));
+                ImGui.TextWrapped(_saveLevelErrorMessage);
+                ImGui.PopStyleColor();
+            }
+
             ImGui.Separator();
 
             if (ImGui.Button("Save##SaveAsConfirm", new Vector2(100, 0)))
@@ -2704,11 +2794,42 @@ public sealed class EditorApp : IDisposable
                     ImGui.CloseCurrentPopup();
                     ExecutePendingActionAfterSave();
                 }
+                else
+                {
+                    _openSaveLevelErrorModal = false;
+                }
             }
             ImGui.SameLine();
             if (ImGui.Button("Cancel##SaveAsCancel", new Vector2(100, 0)))
             {
+                _saveLevelErrorMessage = null;
                 _pendingActionAfterSaveAs = PendingDocumentAction.None;
+                ImGui.CloseCurrentPopup();
+            }
+
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawSaveLevelErrorModal()
+    {
+        bool isOpen = true;
+        if (ImGui.BeginPopupModal("Failed to Save Level##SaveLevelErrorModal", ref isOpen, ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1.0f, 0.42f, 0.42f, 1.0f));
+            ImGui.TextWrapped(_saveLevelErrorMessage ?? "An unknown error occurred while saving the level file.");
+            ImGui.PopStyleColor();
+
+            ImGui.Separator();
+
+            if (ImGui.Button("Choose Another Location...##SaveLevelErrorRetry", new Vector2(190, 0)))
+            {
+                ImGui.CloseCurrentPopup();
+                SaveLevelAsFromDialog();
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("OK##SaveLevelErrorClose", new Vector2(100, 0)))
+            {
                 ImGui.CloseCurrentPopup();
             }
 

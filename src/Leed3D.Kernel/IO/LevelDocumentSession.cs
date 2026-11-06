@@ -109,10 +109,55 @@ public sealed class LevelDocumentSession
     }
 
     /// <summary>
+    /// Ensures a destination file path ends with <c>.level.json</c> (or <c>.json</c> if explicitly provided).
+    /// </summary>
+    public static string NormalizeLevelFilePath(string filePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+        string trimmed = filePath.Trim();
+
+        if (trimmed.EndsWith(".level.json", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+        {
+            return trimmed;
+        }
+
+        if (trimmed.EndsWith(".level", StringComparison.OrdinalIgnoreCase))
+        {
+            return trimmed + ".json";
+        }
+
+        return trimmed + ".level.json";
+    }
+
+    /// <summary>
+    /// Extracts a clean level name from a <c>.level.json</c> or <c>.json</c> file path.
+    /// </summary>
+    public static string DeriveLevelNameFromPath(string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            return "Untitled Level";
+        }
+
+        string fileName = Path.GetFileName(filePath.Trim());
+        if (fileName.EndsWith(".level.json", StringComparison.OrdinalIgnoreCase))
+        {
+            fileName = fileName[..^".level.json".Length];
+        }
+        else if (fileName.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+        {
+            fileName = fileName[..^".json".Length];
+        }
+
+        return string.IsNullOrWhiteSpace(fileName) ? "Untitled Level" : fileName;
+    }
+
+    /// <summary>
     /// Saves the active <see cref="Scene"/> to <see cref="CurrentFilePath"/>.
     /// Returns <c>false</c> if <see cref="CurrentFilePath"/> is not set or if saving fails.
     /// </summary>
-    public bool TrySaveLevel(out string? errorMessage, bool bakeRightHandedRuntime = false)
+    public bool TrySaveLevel(out string? errorMessage, bool bakeRightHandedRuntime = false, Action? beforeSave = null)
     {
         if (string.IsNullOrWhiteSpace(CurrentFilePath))
         {
@@ -121,14 +166,20 @@ public sealed class LevelDocumentSession
             return false;
         }
 
-        return TrySaveLevelAs(CurrentFilePath, out errorMessage, bakeRightHandedRuntime);
+        return TrySaveLevelAs(CurrentFilePath, out errorMessage, bakeRightHandedRuntime, updateSceneName: false, beforeSave);
     }
 
     /// <summary>
     /// Saves the active <see cref="Scene"/> to <paramref name="filePath"/>, updates <see cref="CurrentFilePath"/>,
-    /// and marks the document as saved (<see cref="HasUnsavedChanges"/> becomes <c>false</c>).
+    /// optionally updates <see cref="EditorScene.Name"/> to match the new filename, and marks the document as saved
+    /// (<see cref="HasUnsavedChanges"/> becomes <c>false</c>).
     /// </summary>
-    public bool TrySaveLevelAs(string? filePath, out string? errorMessage, bool bakeRightHandedRuntime = false)
+    public bool TrySaveLevelAs(
+        string? filePath,
+        out string? errorMessage,
+        bool bakeRightHandedRuntime = false,
+        bool updateSceneName = true,
+        Action? beforeSave = null)
     {
         if (string.IsNullOrWhiteSpace(filePath))
         {
@@ -137,11 +188,19 @@ public sealed class LevelDocumentSession
             return false;
         }
 
-        string trimmedPath = filePath.Trim();
+        string normalizedPath = NormalizeLevelFilePath(filePath);
+        string previousSceneName = Scene.Name;
+
         try
         {
-            LevelSerializer.Save(Scene, trimmedPath, bakeRightHandedRuntime);
-            CurrentFilePath = trimmedPath;
+            beforeSave?.Invoke();
+            if (updateSceneName)
+            {
+                Scene.Name = DeriveLevelNameFromPath(normalizedPath);
+            }
+
+            LevelSerializer.Save(Scene, normalizedPath, bakeRightHandedRuntime);
+            CurrentFilePath = normalizedPath;
             UndoStack.MarkSaved();
             LastErrorMessage = null;
             errorMessage = null;
@@ -149,7 +208,8 @@ public sealed class LevelDocumentSession
         }
         catch (Exception ex)
         {
-            errorMessage = $"Failed to save level to '{trimmedPath}': {ex.Message}";
+            Scene.Name = previousSceneName;
+            errorMessage = $"Failed to save level to '{normalizedPath}': {ex.Message}";
             LastErrorMessage = errorMessage;
             return false;
         }
