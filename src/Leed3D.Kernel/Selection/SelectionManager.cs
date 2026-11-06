@@ -114,20 +114,33 @@ public sealed class SelectionManager
     {
         if (_selectedObjectIds.Contains(objectId))
         {
-            _selectedObjectIds.Remove(objectId);
-            _orderedSelectedObjectIds.Remove(objectId);
-            if (ActiveObjectId == objectId)
-            {
-                ActiveObjectId = _orderedSelectedObjectIds.Count > 0 ? _orderedSelectedObjectIds[^1] : null;
-            }
+            DeselectObject(objectId);
         }
         else
         {
             _selectedObjectIds.Add(objectId);
             _orderedSelectedObjectIds.Add(objectId);
             ActiveObjectId = objectId;
+            ClearSubElementSelection();
         }
-        ClearSubElementSelection();
+    }
+
+    public void DeselectObject(int objectId)
+    {
+        if (_selectedObjectIds.Remove(objectId))
+        {
+            _orderedSelectedObjectIds.Remove(objectId);
+        }
+
+        if (ActiveObjectId == objectId)
+        {
+            ActiveObjectId = _orderedSelectedObjectIds.Count > 0 ? _orderedSelectedObjectIds[^1] : null;
+            ClearSubElementSelection();
+            if (!ActiveObjectId.HasValue && Mode != InteractionMode.Object)
+            {
+                Mode = InteractionMode.Object;
+            }
+        }
     }
 
     public void SelectSingleEntity(string entityId)
@@ -147,18 +160,24 @@ public sealed class SelectionManager
         ArgumentException.ThrowIfNullOrWhiteSpace(entityId);
         if (_selectedEntityIds.Contains(entityId))
         {
-            _selectedEntityIds.Remove(entityId);
-            if (ActiveEntityId == entityId)
-            {
-                ActiveEntityId = _selectedEntityIds.Count > 0 ? _selectedEntityIds.First() : null;
-            }
+            DeselectEntity(entityId);
         }
         else
         {
             _selectedEntityIds.Add(entityId);
             ActiveEntityId = entityId;
+            ClearSubElementSelection();
         }
-        ClearSubElementSelection();
+    }
+
+    public void DeselectEntity(string entityId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(entityId);
+        _selectedEntityIds.Remove(entityId);
+        if (string.Equals(ActiveEntityId, entityId, StringComparison.OrdinalIgnoreCase))
+        {
+            ActiveEntityId = _selectedEntityIds.Count > 0 ? _selectedEntityIds.First() : null;
+        }
     }
 
     public void SelectMultipleEntities(IEnumerable<string> entityIds)
@@ -304,6 +323,59 @@ public sealed class SelectionManager
         _selectedVertexIds.Clear();
         _selectedEdges.Clear();
         _selectedFaceIds.Clear();
+    }
+
+    /// <summary>
+    /// Prunes any selected object IDs, entity IDs, or sub-mesh element IDs (vertices, edges, faces)
+    /// that no longer exist in <paramref name="scene"/> or belong to hidden/locked objects or entities.
+    /// If the active object in Edit Mode was removed, hidden, or locked, returns to Object Mode.
+    /// </summary>
+    public void SanitizeAgainstScene(EditorScene scene)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+
+        for (int i = _orderedSelectedObjectIds.Count - 1; i >= 0; i--)
+        {
+            int objId = _orderedSelectedObjectIds[i];
+            if (scene.GetObject(objId) is not { Visible: true, Locked: false })
+            {
+                _orderedSelectedObjectIds.RemoveAt(i);
+                _selectedObjectIds.Remove(objId);
+            }
+        }
+
+        _selectedObjectIds.RemoveWhere(id => scene.GetObject(id) is not { Visible: true, Locked: false });
+
+        if (ActiveObjectId.HasValue && scene.GetObject(ActiveObjectId.Value) is not { Visible: true, Locked: false })
+        {
+            ActiveObjectId = _orderedSelectedObjectIds.Count > 0 ? _orderedSelectedObjectIds[^1] : null;
+        }
+
+        _selectedEntityIds.RemoveWhere(id => scene.GetEntity(id) is not { Visible: true, Locked: false });
+
+        if (!string.IsNullOrEmpty(ActiveEntityId) && scene.GetEntity(ActiveEntityId) is not { Visible: true, Locked: false })
+        {
+            ActiveEntityId = _selectedEntityIds.Count > 0 ? _selectedEntityIds.First() : null;
+        }
+
+        if (ActiveObjectId.HasValue && scene.GetObject(ActiveObjectId.Value)?.Mesh is { } mesh)
+        {
+            _selectedVertexIds.RemoveWhere(vId => mesh.GetVertex(vId) is null);
+            _selectedFaceIds.RemoveWhere(fId => mesh.GetFace(fId) is null);
+            if (_selectedEdges.Count > 0)
+            {
+                TopologyGraph topology = mesh.GetTopology();
+                _selectedEdges.RemoveWhere(edge => topology.GetEdge(edge) is null);
+            }
+        }
+        else
+        {
+            ClearSubElementSelection();
+            if (Mode != InteractionMode.Object)
+            {
+                Mode = InteractionMode.Object;
+            }
+        }
     }
 
     public void SelectAll(EditorScene scene)

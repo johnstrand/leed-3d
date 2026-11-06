@@ -1,3 +1,5 @@
+using Leed3D.Kernel.Selection;
+
 namespace Leed3D.Kernel.Scene;
 
 /// <summary>
@@ -25,6 +27,7 @@ public sealed class UndoRedoStack
 
     public bool CanUndo => _undoList.Count > 0;
     public bool CanRedo => _redoList.Count > 0;
+    public bool HasActiveTransaction => _inProgressTransaction is not null;
 
     public string? NextUndoDescription => _undoList.Last?.Value.Description;
     public string? NextRedoDescription => _redoList.Last?.Value.Description;
@@ -76,6 +79,29 @@ public sealed class UndoRedoStack
     }
 
     /// <summary>
+    /// Updates the <see cref="UndoRecord.AfterState"/> of the most recently recorded undo entry
+    /// so in-place adjustments (such as the Adjust Last Primitive overlay) are preserved on Undo -> Redo.
+    /// </summary>
+    public void UpdateLatestAfterState(EditorScene currentScene)
+    {
+        ArgumentNullException.ThrowIfNull(currentScene);
+
+        if (_undoList.Last is null)
+        {
+            return;
+        }
+
+        UndoRecord previous = _undoList.Last.Value;
+        UndoRecord updated = previous with { AfterState = currentScene.CloneSnapshot() };
+        _undoList.Last.Value = updated;
+
+        if (ReferenceEquals(_savedRecord, previous))
+        {
+            _savedRecord = null;
+        }
+    }
+
+    /// <summary>
     /// Begins an interactive transaction (e.g., when the user starts dragging a gizmo or starts a modal transform).
     /// </summary>
     public void BeginTransaction(string description, EditorScene currentScene)
@@ -123,8 +149,9 @@ public sealed class UndoRedoStack
 
     /// <summary>
     /// Reverts the most recent action, updating targetScene to the before state.
+    /// When <paramref name="selection"/> is provided, prunes any stale selected element IDs against the restored scene.
     /// </summary>
-    public bool Undo(EditorScene targetScene)
+    public bool Undo(EditorScene targetScene, SelectionManager? selection = null)
     {
         ArgumentNullException.ThrowIfNull(targetScene);
 
@@ -137,14 +164,16 @@ public sealed class UndoRedoStack
         _undoList.RemoveLast();
 
         targetScene.RestoreFromSnapshot(record.BeforeState);
+        selection?.SanitizeAgainstScene(targetScene);
         _redoList.AddLast(record);
         return true;
     }
 
     /// <summary>
     /// Re-applies the most recently undone action, updating targetScene to the after state.
+    /// When <paramref name="selection"/> is provided, prunes any stale selected element IDs against the restored scene.
     /// </summary>
-    public bool Redo(EditorScene targetScene)
+    public bool Redo(EditorScene targetScene, SelectionManager? selection = null)
     {
         ArgumentNullException.ThrowIfNull(targetScene);
 
@@ -157,6 +186,7 @@ public sealed class UndoRedoStack
         _redoList.RemoveLast();
 
         targetScene.RestoreFromSnapshot(record.AfterState);
+        selection?.SanitizeAgainstScene(targetScene);
         _undoList.AddLast(record);
         return true;
     }

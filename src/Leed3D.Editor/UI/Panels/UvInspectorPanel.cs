@@ -13,6 +13,8 @@ namespace Leed3D.Editor.UI.Panels;
 /// </summary>
 public sealed class UvInspectorPanel
 {
+    private EditorScene? _dragSnapshot;
+
     public void Draw(EditorApp app)
     {
         ArgumentNullException.ThrowIfNull(app);
@@ -52,7 +54,11 @@ public sealed class UvInspectorPanel
         Vector2 offset = uv.Offset;
         if (ImGui.DragFloat2("Offset (U, V)", ref offset, 0.05f))
         {
-            RecordAndMutate(app, "Adjust UV Offset", (f) => f.UvMapping.Offset = offset);
+            MutateContinuous(app, (f) => f.UvMapping.Offset = offset);
+        }
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            CommitContinuous(app, "Adjust UV Offset");
         }
         ImGui.SameLine();
         if (ImGui.Button("Reset##OffsetReset"))
@@ -64,7 +70,11 @@ public sealed class UvInspectorPanel
         Vector2 scale = uv.Scale;
         if (ImGui.DragFloat2("Scale (U, V)", ref scale, 0.05f, 0.01f, 100.0f))
         {
-            RecordAndMutate(app, "Adjust UV Scale", (f) => f.UvMapping.Scale = scale);
+            MutateContinuous(app, (f) => f.UvMapping.Scale = scale);
+        }
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            CommitContinuous(app, "Adjust UV Scale");
         }
 
         // Quick scale buttons
@@ -88,7 +98,11 @@ public sealed class UvInspectorPanel
         float rot = uv.RotationDegrees;
         if (ImGui.SliderFloat("Rotation (°)", ref rot, -180.0f, 180.0f, "%.1f°"))
         {
-            RecordAndMutate(app, "Adjust UV Rotation", (f) => f.UvMapping.RotationDegrees = rot);
+            MutateContinuous(app, (f) => f.UvMapping.RotationDegrees = rot);
+        }
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            CommitContinuous(app, "Adjust UV Rotation");
         }
 
         if (ImGui.Button("-90°")) RecordAndMutate(app, "UV Rotate -90", (f) => f.UvMapping.RotationDegrees = (f.UvMapping.RotationDegrees - 90.0f) % 360.0f);
@@ -185,5 +199,26 @@ public sealed class UvInspectorPanel
 
         app.UndoStack.RecordAction(description, before, app.Scene);
         app.StatusMessage = $"{description} applied to {targets.Count} face(s).";
+    }
+
+    private void MutateContinuous(EditorApp app, Action<PolygonFace> action)
+    {
+        _dragSnapshot ??= app.Scene.CloneSnapshot();
+        List<(SceneObject Obj, PolygonFace Face)> targets = GetTargetFaces(app);
+        foreach (var (_, face) in targets)
+        {
+            action(face);
+        }
+    }
+
+    private void CommitContinuous(EditorApp app, string description)
+    {
+        if (_dragSnapshot is not null)
+        {
+            List<(SceneObject Obj, PolygonFace Face)> targets = GetTargetFaces(app);
+            app.UndoStack.RecordAction(description, _dragSnapshot, app.Scene);
+            _dragSnapshot = null;
+            app.StatusMessage = $"{description} applied to {targets.Count} face(s).";
+        }
     }
 }

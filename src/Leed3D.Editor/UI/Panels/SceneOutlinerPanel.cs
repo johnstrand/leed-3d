@@ -105,7 +105,7 @@ public sealed class SceneOutlinerPanel
         ImGui.PushStyleColor(ImGuiCol.Text, visColor);
         if (ImGui.Button(obj.Visible ? "[V]" : "[-]"))
         {
-            obj.Visible = !obj.Visible;
+            ToggleObjectVisibility(app, obj);
         }
         if (ImGui.IsItemHovered())
         {
@@ -120,7 +120,7 @@ public sealed class SceneOutlinerPanel
         ImGui.PushStyleColor(ImGuiCol.Text, lockColor);
         if (ImGui.Button(obj.Locked ? "[L]" : "[-]"))
         {
-            obj.Locked = !obj.Locked;
+            ToggleObjectLock(app, obj);
         }
         if (ImGui.IsItemHovered())
         {
@@ -194,12 +194,12 @@ public sealed class SceneOutlinerPanel
 
                 if (ImGui.MenuItem(obj.Visible ? "Hide" : "Show"))
                 {
-                    obj.Visible = !obj.Visible;
+                    ToggleObjectVisibility(app, obj);
                 }
 
                 if (ImGui.MenuItem(obj.Locked ? "Unlock" : "Lock"))
                 {
-                    obj.Locked = !obj.Locked;
+                    ToggleObjectLock(app, obj);
                 }
 
                 ImGui.EndPopup();
@@ -218,7 +218,7 @@ public sealed class SceneOutlinerPanel
         ImGui.PushStyleColor(ImGuiCol.Text, visColor);
         if (ImGui.Button(ent.Visible ? "[V]" : "[-]"))
         {
-            ent.Visible = !ent.Visible;
+            ToggleEntityVisibility(app, ent);
         }
         if (ImGui.IsItemHovered())
         {
@@ -233,7 +233,7 @@ public sealed class SceneOutlinerPanel
         ImGui.PushStyleColor(ImGuiCol.Text, lockColor);
         if (ImGui.Button(ent.Locked ? "[L]" : "[-]"))
         {
-            ent.Locked = !ent.Locked;
+            ToggleEntityLock(app, ent);
         }
         if (ImGui.IsItemHovered())
         {
@@ -301,6 +301,18 @@ public sealed class SceneOutlinerPanel
                 if (ImGui.MenuItem("Delete", "Del"))
                 {
                     DeleteEntity(app, ent);
+                }
+
+                ImGui.Separator();
+
+                if (ImGui.MenuItem(ent.Visible ? "Hide" : "Show"))
+                {
+                    ToggleEntityVisibility(app, ent);
+                }
+
+                if (ImGui.MenuItem(ent.Locked ? "Unlock" : "Lock"))
+                {
+                    ToggleEntityLock(app, ent);
                 }
 
                 ImGui.EndPopup();
@@ -584,8 +596,60 @@ public sealed class SceneOutlinerPanel
     {
         EditorScene before = app.Scene.CloneSnapshot();
         app.Scene.RemoveEntity(ent.Id);
-        app.Selection.ClearSelection();
+        app.Selection.SanitizeAgainstScene(app.Scene);
         app.UndoStack.RecordAction($"Delete {ent.Id}", before, app.Scene);
         app.StatusMessage = $"Deleted entity {ent.Id}.";
+    }
+
+    private static void ToggleObjectVisibility(EditorApp app, SceneObject obj)
+    {
+        EditorScene before = app.Scene.CloneSnapshot();
+        obj.Visible = !obj.Visible;
+        if (!obj.Visible)
+        {
+            app.Selection.SanitizeAgainstScene(app.Scene);
+        }
+        string actionName = obj.Visible ? $"Show {obj.Name}" : $"Hide {obj.Name}";
+        app.UndoStack.RecordAction(actionName, before, app.Scene);
+        app.StatusMessage = $"{actionName}.";
+    }
+
+    private static void ToggleObjectLock(EditorApp app, SceneObject obj)
+    {
+        EditorScene before = app.Scene.CloneSnapshot();
+        obj.Locked = !obj.Locked;
+        if (obj.Locked)
+        {
+            app.Selection.SanitizeAgainstScene(app.Scene);
+        }
+        string actionName = obj.Locked ? $"Lock {obj.Name}" : $"Unlock {obj.Name}";
+        app.UndoStack.RecordAction(actionName, before, app.Scene);
+        app.StatusMessage = $"{actionName}.";
+    }
+
+    private static void ToggleEntityVisibility(EditorApp app, LevelEntity ent)
+    {
+        EditorScene before = app.Scene.CloneSnapshot();
+        ent.Visible = !ent.Visible;
+        if (!ent.Visible)
+        {
+            app.Selection.SanitizeAgainstScene(app.Scene);
+        }
+        string actionName = ent.Visible ? $"Show Entity {ent.Id}" : $"Hide Entity {ent.Id}";
+        app.UndoStack.RecordAction(actionName, before, app.Scene);
+        app.StatusMessage = $"{actionName}.";
+    }
+
+    private static void ToggleEntityLock(EditorApp app, LevelEntity ent)
+    {
+        EditorScene before = app.Scene.CloneSnapshot();
+        ent.Locked = !ent.Locked;
+        if (ent.Locked)
+        {
+            app.Selection.SanitizeAgainstScene(app.Scene);
+        }
+        string actionName = ent.Locked ? $"Lock Entity {ent.Id}" : $"Unlock Entity {ent.Id}";
+        app.UndoStack.RecordAction(actionName, before, app.Scene);
+        app.StatusMessage = $"{actionName}.";
     }
 }

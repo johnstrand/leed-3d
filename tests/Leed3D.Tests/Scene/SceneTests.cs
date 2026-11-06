@@ -3,6 +3,7 @@ using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Math;
 using Leed3D.Kernel.Primitives;
 using Leed3D.Kernel.Scene;
+using Leed3D.Kernel.Selection;
 
 namespace Leed3D.Tests.Scene;
 
@@ -196,5 +197,87 @@ public class SceneTests
 
         undoStack.Undo(scene);
         Assert.Equal(Vector3.Zero, scene.GetObject(obj.Id)!.Transform.Position);
+    }
+
+    [Fact]
+    public void EditorScene_AddClonedObject_PreservesMetadata()
+    {
+        var scene = new EditorScene("CloneMetadataScene");
+        SceneObject original = scene.AddMeshObject("Crate", PrimitiveGenerator.CreateBox(new Vector3(2, 2, 2)));
+        original.Metadata.AddTag("destructible");
+        original.Metadata.SetProperty("health", 100);
+        original.Metadata.SetProperty("material_sound", "wood");
+
+        SceneObject clone = scene.AddClonedObject(original);
+
+        Assert.NotEqual(original.Id, clone.Id);
+        Assert.Contains("destructible", clone.Metadata.Tags);
+        Assert.Equal(100, clone.Metadata.GetInt("health"));
+        Assert.Equal("wood", clone.Metadata.GetString("material_sound"));
+
+        // Mutating original metadata does not affect clone metadata
+        original.Metadata.SetProperty("health", 25);
+        Assert.Equal(100, clone.Metadata.GetInt("health"));
+    }
+
+    [Fact]
+    public void PrimitiveCreationController_RegenerateActiveMesh_UpdatesRedoAfterState()
+    {
+        var scene = new EditorScene("PrimitiveRedoScene");
+        var undoStack = new UndoRedoStack();
+        var controller = new PrimitiveCreationController(scene, undoStack);
+
+        SceneObject box = controller.SpawnPrimitive(PrimitiveType.Box, new Vector3(1, 2, 3));
+        controller.BoxParams = controller.BoxParams with { Size = new Vector3(10.0f, 4.0f, 8.0f), SegmentsX = 2 };
+        controller.RegenerateActiveMesh();
+
+        int adjustedVertexCount = box.Mesh!.VertexCount;
+        BoundingBox3D adjustedBounds = box.GetWorldBounds();
+        Assert.True(adjustedVertexCount > 8);
+
+        Assert.True(undoStack.Undo(scene));
+        Assert.Equal(0, scene.ObjectCount);
+
+        Assert.True(undoStack.Redo(scene));
+        Assert.Equal(1, scene.ObjectCount);
+        SceneObject restored = scene.GetObject(box.Id)!;
+        Assert.Equal(adjustedVertexCount, restored.Mesh!.VertexCount);
+        Assert.Equal(adjustedBounds.Size, restored.GetWorldBounds().Size);
+    }
+
+    [Fact]
+    public void UndoRedoStack_SanitizesSelectionOnUndoAndVisibilityLockChanges()
+    {
+        var scene = new EditorScene("SelectionSanitizeScene");
+        var undoStack = new UndoRedoStack();
+        var selection = new SelectionManager();
+
+        EditorScene beforeSpawn = scene.CloneSnapshot();
+        SceneObject box = scene.AddMeshObject("Box", PrimitiveGenerator.CreateBox(new Vector3(2, 2, 2)));
+        undoStack.RecordAction("Add Box", beforeSpawn, scene);
+
+        selection.SelectSingleObject(box.Id);
+        selection.SetMode(InteractionMode.Face, scene);
+        selection.SelectSingleFace(box.Mesh!.Faces[0].Id);
+        Assert.Equal(InteractionMode.Face, selection.Mode);
+        Assert.Single(selection.SelectedFaceIds);
+
+        // Undoing creation of the active object prunes selection and returns to Object mode
+        Assert.True(undoStack.Undo(scene, selection));
+        Assert.Empty(selection.SelectedObjectIds);
+        Assert.Null(selection.ActiveObjectId);
+        Assert.Empty(selection.SelectedFaceIds);
+        Assert.Equal(InteractionMode.Object, selection.Mode);
+
+        // Redo restores the object; selecting it and locking it sanitizes selection
+        Assert.True(undoStack.Redo(scene, selection));
+        SceneObject restored = scene.GetObject(box.Id)!;
+        selection.SelectSingleObject(restored.Id);
+        Assert.Single(selection.SelectedObjectIds);
+
+        restored.Locked = true;
+        selection.SanitizeAgainstScene(scene);
+        Assert.Empty(selection.SelectedObjectIds);
+        Assert.Null(selection.ActiveObjectId);
     }
 }

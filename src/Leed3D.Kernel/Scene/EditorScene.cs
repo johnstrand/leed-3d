@@ -76,7 +76,7 @@ public sealed class EditorScene
 
         int id = _nextObjectId++;
         string name = newName ?? $"{original.Name}_Copy";
-        var clone = new SceneObject(id, name, original.Mesh?.Clone(), original.Transform.Clone())
+        var clone = new SceneObject(id, name, original.Mesh?.Clone(), original.Transform.Clone(), original.Metadata.Clone())
         {
             Visible = original.Visible,
             Locked = original.Locked

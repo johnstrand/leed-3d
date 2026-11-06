@@ -590,14 +590,14 @@ public sealed class EditorApp : IDisposable
             string undoLabel = UndoStack.CanUndo ? $"Undo {UndoStack.NextUndoDescription}" : "Undo";
             if (ImGui.MenuItem(undoLabel, "Ctrl+Z", false, UndoStack.CanUndo))
             {
-                UndoStack.Undo(Scene);
+                UndoStack.Undo(Scene, Selection);
                 PrimitiveController.Dismiss();
             }
 
             string redoLabel = UndoStack.CanRedo ? $"Redo {UndoStack.NextRedoDescription}" : "Redo";
             if (ImGui.MenuItem(redoLabel, "Ctrl+Y", false, UndoStack.CanRedo))
             {
-                UndoStack.Redo(Scene);
+                UndoStack.Redo(Scene, Selection);
                 PrimitiveController.Dismiss();
             }
 

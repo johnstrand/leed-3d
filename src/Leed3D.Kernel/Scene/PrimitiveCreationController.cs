@@ -134,6 +134,7 @@ public sealed class PrimitiveCreationController
         };
 
         ActiveObject.Mesh = newMesh;
+        _undoStack.UpdateLatestAfterState(_scene);
     }
 
     /// <summary>

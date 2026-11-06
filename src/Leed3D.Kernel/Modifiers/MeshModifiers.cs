@@ -100,6 +100,10 @@ public static class MeshModifiers
                     {
                         int newVId = mesh.AddVertex(v.Position);
                         oldToNewVertexId[vId] = newVId;
+                        if (mesh.GetVertex(newVId) is { } newVert && (v.Metadata.Properties.Count > 0 || v.Metadata.Tags.Count > 0))
+                        {
+                            newVert.Metadata = v.Metadata.Clone();
+                        }
                     }
                 }
             }
@@ -109,7 +113,11 @@ public static class MeshModifiers
         foreach (PolygonFace face in targetFaces)
         {
             var newLoop = face.VertexIds.Select(id => oldToNewVertexId[id]).ToList();
-            int newFaceId = mesh.AddFace(newLoop, face.MaterialId);
+            int newFaceId = mesh.AddFace(newLoop, face.MaterialId, face.UvMapping);
+            if (mesh.GetFace(newFaceId) is { } newFace && (face.Metadata.Properties.Count > 0 || face.Metadata.Tags.Count > 0))
+            {
+                newFace.Metadata = face.Metadata.Clone();
+            }
             newFaceIds.Add(newFaceId);
         }
 

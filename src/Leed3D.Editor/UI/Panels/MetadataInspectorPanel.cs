@@ -17,6 +17,7 @@ public sealed class MetadataInspectorPanel
     private string _newTagInput = string.Empty;
     private string _newPropKey = string.Empty;
     private MetadataValueType _newPropType = MetadataValueType.String;
+    private EditorScene? _dragSnapshot;
     private static readonly MetadataValueType[] AvailableTypes =
     [
         MetadataValueType.String,
@@ -153,14 +154,18 @@ public sealed class MetadataInspectorPanel
         ImGui.SetNextItemWidth(200.0f);
         if (ImGui.DragFloat3("Position##EntPos", ref pos, 0.05f))
         {
-            RecordEntityMutation(app, $"Move Entity '{entity.Id}'", e => e.Transform.Position = pos);
+            MutateEntityContinuous(app, e => e.Transform.Position = pos);
+        }
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            CommitEntityContinuous(app, $"Move Entity '{entity.Id}'");
         }
 
         Vector3 rot = entity.Transform.RotationEulerDegrees;
         ImGui.SetNextItemWidth(200.0f);
         if (ImGui.DragFloat3("Rotation##EntRot", ref rot, 1.0f))
         {
-            RecordEntityMutation(app, $"Rotate Entity '{entity.Id}'", e =>
+            MutateEntityContinuous(app, e =>
             {
                 e.Transform.RotationEulerDegrees = rot;
                 if (e.ClassName.Equals("player_spawn", StringComparison.OrdinalIgnoreCase) && e.Properties.Properties.ContainsKey("yaw"))
@@ -169,12 +174,20 @@ public sealed class MetadataInspectorPanel
                 }
             });
         }
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            CommitEntityContinuous(app, $"Rotate Entity '{entity.Id}'");
+        }
 
         Vector3 scale = entity.Transform.Scale;
         ImGui.SetNextItemWidth(200.0f);
         if (ImGui.DragFloat3("Scale##EntScale", ref scale, 0.05f))
         {
-            RecordEntityMutation(app, $"Scale Entity '{entity.Id}'", e => e.Transform.Scale = scale);
+            MutateEntityContinuous(app, e => e.Transform.Scale = scale);
+        }
+        if (ImGui.IsItemDeactivatedAfterEdit())
+        {
+            CommitEntityContinuous(app, $"Scale Entity '{entity.Id}'");
         }
 
         ImGui.Separator();
@@ -268,7 +281,11 @@ public sealed class MetadataInspectorPanel
             ImGui.SetNextItemWidth(120.0f);
             if (ImGui.DragInt("Team##PlayerTeam", ref team, 1, 0, 16))
             {
-                RecordEntityMutation(app, "Set Spawn Team", e => e.Properties.SetInt("team", team));
+                MutateEntityContinuous(app, e => e.Properties.SetInt("team", team));
+            }
+            if (ImGui.IsItemDeactivatedAfterEdit())
+            {
+                CommitEntityContinuous(app, "Set Spawn Team");
             }
 
             float yaw = entity.Transform.RotationEulerDegrees.Y;
@@ -280,11 +297,15 @@ public sealed class MetadataInspectorPanel
             ImGui.SetNextItemWidth(120.0f);
             if (ImGui.DragFloat("Yaw Facing##PlayerYaw", ref yaw, 1.0f, -360.0f, 360.0f))
             {
-                RecordEntityMutation(app, "Set Spawn Yaw", e =>
+                MutateEntityContinuous(app, e =>
                 {
                     e.Properties.SetFloat("yaw", yaw);
                     e.Transform.RotationEulerDegrees = new Vector3(e.Transform.RotationEulerDegrees.X, yaw, e.Transform.RotationEulerDegrees.Z);
                 });
+            }
+            if (ImGui.IsItemDeactivatedAfterEdit())
+            {
+                CommitEntityContinuous(app, "Set Spawn Yaw");
             }
         }
 
@@ -326,7 +347,11 @@ public sealed class MetadataInspectorPanel
                     (byte)System.Math.Clamp((int)(colVec.Y * 255f), 0, 255),
                     (byte)System.Math.Clamp((int)(colVec.Z * 255f), 0, 255),
                     (byte)System.Math.Clamp((int)(colVec.W * 255f), 0, 255));
-                RecordEntityMutation(app, "Set Light Color", e => e.Properties.SetColor("color", updated));
+                MutateEntityContinuous(app, e => e.Properties.SetColor("color", updated));
+            }
+            if (ImGui.IsItemDeactivatedAfterEdit())
+            {
+                CommitEntityContinuous(app, "Set Light Color");
             }
 
             float intensity = 1.5f;
@@ -338,7 +363,11 @@ public sealed class MetadataInspectorPanel
             ImGui.SetNextItemWidth(120.0f);
             if (ImGui.DragFloat("Intensity##LightIntensity", ref intensity, 0.05f, 0.0f, 100.0f))
             {
-                RecordEntityMutation(app, "Set Light Intensity", e => e.Properties.SetFloat("intensity", intensity));
+                MutateEntityContinuous(app, e => e.Properties.SetFloat("intensity", intensity));
+            }
+            if (ImGui.IsItemDeactivatedAfterEdit())
+            {
+                CommitEntityContinuous(app, "Set Light Intensity");
             }
 
             float radius = 12.0f;
@@ -350,7 +379,11 @@ public sealed class MetadataInspectorPanel
             ImGui.SetNextItemWidth(120.0f);
             if (ImGui.DragFloat("Radius##LightRadius", ref radius, 0.25f, 0.1f, 512.0f))
             {
-                RecordEntityMutation(app, "Set Light Radius", e => e.Properties.SetFloat("radius", radius));
+                MutateEntityContinuous(app, e => e.Properties.SetFloat("radius", radius));
+            }
+            if (ImGui.IsItemDeactivatedAfterEdit())
+            {
+                CommitEntityContinuous(app, "Set Light Radius");
             }
 
             if (lightType.Equals("spot", StringComparison.OrdinalIgnoreCase))
@@ -364,7 +397,11 @@ public sealed class MetadataInspectorPanel
                 ImGui.SetNextItemWidth(120.0f);
                 if (ImGui.DragFloat("Spot Angle##LightSpotAngle", ref spotAngle, 0.5f, 1.0f, 179.0f))
                 {
-                    RecordEntityMutation(app, "Set Spot Angle", e => e.Properties.SetFloat("spot_angle", spotAngle));
+                    MutateEntityContinuous(app, e => e.Properties.SetFloat("spot_angle", spotAngle));
+                }
+                if (ImGui.IsItemDeactivatedAfterEdit())
+                {
+                    CommitEntityContinuous(app, "Set Spot Angle");
                 }
             }
         }
@@ -653,7 +690,7 @@ public sealed class MetadataInspectorPanel
         }
     }
 
-    private static void DrawPropertyValueEditor(EditorApp app, string key, MetadataValue val)
+    private void DrawPropertyValueEditor(EditorApp app, string key, MetadataValue val)
     {
         switch (val.Type)
         {
@@ -663,7 +700,11 @@ public sealed class MetadataInspectorPanel
                 ImGui.SetNextItemWidth(-1);
                 if (ImGui.InputText($"##str_{key}", ref sVal, 128))
                 {
-                    RecordAndMutate(app, $"Edit property '{key}'", meta => meta.SetProperty(key, sVal));
+                    MutateMetadataContinuous(app, meta => meta.SetProperty(key, sVal));
+                }
+                if (ImGui.IsItemDeactivatedAfterEdit())
+                {
+                    CommitMetadataContinuous(app, $"Edit property '{key}'");
                 }
                 break;
             }
@@ -674,7 +715,11 @@ public sealed class MetadataInspectorPanel
                 ImGui.SetNextItemWidth(-1);
                 if (ImGui.DragFloat($"##flt_{key}", ref fVal, 0.05f))
                 {
-                    RecordAndMutate(app, $"Edit property '{key}'", meta => meta.SetProperty(key, fVal));
+                    MutateMetadataContinuous(app, meta => meta.SetProperty(key, fVal));
+                }
+                if (ImGui.IsItemDeactivatedAfterEdit())
+                {
+                    CommitMetadataContinuous(app, $"Edit property '{key}'");
                 }
                 break;
             }
@@ -685,7 +730,11 @@ public sealed class MetadataInspectorPanel
                 ImGui.SetNextItemWidth(-1);
                 if (ImGui.DragInt($"##int_{key}", ref iVal, 1))
                 {
-                    RecordAndMutate(app, $"Edit property '{key}'", meta => meta.SetProperty(key, iVal));
+                    MutateMetadataContinuous(app, meta => meta.SetProperty(key, iVal));
+                }
+                if (ImGui.IsItemDeactivatedAfterEdit())
+                {
+                    CommitMetadataContinuous(app, $"Edit property '{key}'");
                 }
                 break;
             }
@@ -712,7 +761,11 @@ public sealed class MetadataInspectorPanel
                         (byte)System.Math.Clamp((int)(colVec.Y * 255f), 0, 255),
                         (byte)System.Math.Clamp((int)(colVec.Z * 255f), 0, 255),
                         (byte)System.Math.Clamp((int)(colVec.W * 255f), 0, 255));
-                    RecordAndMutate(app, $"Edit property '{key}'", meta => meta.SetProperty(key, updated));
+                    MutateMetadataContinuous(app, meta => meta.SetProperty(key, updated));
+                }
+                if (ImGui.IsItemDeactivatedAfterEdit())
+                {
+                    CommitMetadataContinuous(app, $"Edit property '{key}'");
                 }
                 break;
             }
@@ -723,7 +776,11 @@ public sealed class MetadataInspectorPanel
                 ImGui.SetNextItemWidth(-1);
                 if (ImGui.DragFloat3($"##vec_{key}", ref vVal, 0.05f))
                 {
-                    RecordAndMutate(app, $"Edit property '{key}'", meta => meta.SetProperty(key, vVal));
+                    MutateMetadataContinuous(app, meta => meta.SetProperty(key, vVal));
+                }
+                if (ImGui.IsItemDeactivatedAfterEdit())
+                {
+                    CommitMetadataContinuous(app, $"Edit property '{key}'");
                 }
                 break;
             }
@@ -918,5 +975,48 @@ public sealed class MetadataInspectorPanel
 
         app.UndoStack.RecordAction(description, before, app.Scene);
         app.StatusMessage = $"{description} ({count} element(s)).";
+    }
+
+    private void MutateEntityContinuous(EditorApp app, Action<LevelEntity> action)
+    {
+        _dragSnapshot ??= app.Scene.CloneSnapshot();
+        foreach (string entId in app.Selection.SelectedEntityIds)
+        {
+            if (app.Scene.GetEntity(entId) is { } entity)
+            {
+                action(entity);
+            }
+        }
+    }
+
+    private void CommitEntityContinuous(EditorApp app, string description)
+    {
+        if (_dragSnapshot is not null)
+        {
+            app.UndoStack.RecordAction(description, _dragSnapshot, app.Scene);
+            _dragSnapshot = null;
+            app.StatusMessage = $"{description}.";
+        }
+    }
+
+    private void MutateMetadataContinuous(EditorApp app, Action<ElementMetadata> action)
+    {
+        _dragSnapshot ??= app.Scene.CloneSnapshot();
+        List<ElementMetadata> targets = GetTargetMetadatas(app, out _, out _);
+        for (int i = 0; i < targets.Count; i++)
+        {
+            action(targets[i]);
+        }
+    }
+
+    private void CommitMetadataContinuous(EditorApp app, string description)
+    {
+        if (_dragSnapshot is not null)
+        {
+            List<ElementMetadata> targets = GetTargetMetadatas(app, out _, out int count);
+            app.UndoStack.RecordAction(description, _dragSnapshot, app.Scene);
+            _dragSnapshot = null;
+            app.StatusMessage = $"{description} ({count} element(s)).";
+        }
     }
 }

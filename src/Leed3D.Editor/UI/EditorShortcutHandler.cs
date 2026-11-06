@@ -205,7 +205,7 @@ public sealed class EditorShortcutHandler
         // 6. Undo (Ctrl+Z) & Redo (Ctrl+Y or Ctrl+Shift+Z)
         if (ctrl && !shift && Raylib.IsKeyPressed(KeyboardKey.Z))
         {
-            if (_app.UndoStack.Undo(_app.Scene))
+            if (_app.UndoStack.Undo(_app.Scene, _app.Selection))
             {
                 _app.PrimitiveController.Dismiss();
                 _app.StatusMessage = "Undid last action.";
@@ -215,7 +215,7 @@ public sealed class EditorShortcutHandler
         else if ((ctrl && Raylib.IsKeyPressed(KeyboardKey.Y)) ||
                  (ctrl && shift && Raylib.IsKeyPressed(KeyboardKey.Z)))
         {
-            if (_app.UndoStack.Redo(_app.Scene))
+            if (_app.UndoStack.Redo(_app.Scene, _app.Selection))
             {
                 _app.PrimitiveController.Dismiss();
                 _app.StatusMessage = "Redid action.";
