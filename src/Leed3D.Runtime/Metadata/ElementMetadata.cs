@@ -135,6 +135,7 @@ public sealed class ElementMetadata
 
     public bool IsEmpty => _properties.Count == 0 && _tags.Count == 0;
     public int Count => _properties.Count + _tags.Count;
+    public int Version { get; private set; }
 
     public ElementMetadata()
     {
@@ -169,6 +170,7 @@ public sealed class ElementMetadata
         ArgumentException.ThrowIfNullOrWhiteSpace(key);
         ArgumentNullException.ThrowIfNull(value);
         _properties[key.Trim()] = value;
+        Version++;
     }
 
     public void SetProperty(string key, MetadataValue value) => Set(key, value);
@@ -237,21 +239,43 @@ public sealed class ElementMetadata
     public bool Remove(string key)
     {
         if (string.IsNullOrWhiteSpace(key)) return false;
-        return _properties.Remove(key.Trim());
+        if (_properties.Remove(key.Trim()))
+        {
+            Version++;
+            return true;
+        }
+        return false;
     }
 
-    public void ClearProperties() => _properties.Clear();
+    public void ClearProperties()
+    {
+        if (_properties.Count > 0)
+        {
+            _properties.Clear();
+            Version++;
+        }
+    }
 
     public bool AddTag(string tag)
     {
         if (string.IsNullOrWhiteSpace(tag)) return false;
-        return _tags.Add(tag.Trim());
+        if (_tags.Add(tag.Trim()))
+        {
+            Version++;
+            return true;
+        }
+        return false;
     }
 
     public bool RemoveTag(string tag)
     {
         if (string.IsNullOrWhiteSpace(tag)) return false;
-        return _tags.Remove(tag.Trim());
+        if (_tags.Remove(tag.Trim()))
+        {
+            Version++;
+            return true;
+        }
+        return false;
     }
 
     public bool HasTag(string tag)
@@ -260,31 +284,55 @@ public sealed class ElementMetadata
         return _tags.Contains(tag.Trim());
     }
 
-    public void ClearTags() => _tags.Clear();
+    public void ClearTags()
+    {
+        if (_tags.Count > 0)
+        {
+            _tags.Clear();
+            Version++;
+        }
+    }
 
     public void Clear()
     {
-        _properties.Clear();
-        _tags.Clear();
+        if (_properties.Count > 0 || _tags.Count > 0)
+        {
+            _properties.Clear();
+            _tags.Clear();
+            Version++;
+        }
     }
 
     public void MergeFrom(ElementMetadata other)
     {
         ArgumentNullException.ThrowIfNull(other);
+        bool changed = false;
         foreach (var kvp in other._properties)
         {
             _properties[kvp.Key] = kvp.Value;
+            changed = true;
         }
 
         foreach (string t in other._tags)
         {
-            _tags.Add(t);
+            if (_tags.Add(t))
+            {
+                changed = true;
+            }
+        }
+
+        if (changed)
+        {
+            Version++;
         }
     }
 
     public ElementMetadata Clone()
     {
-        return new ElementMetadata(_properties, _tags);
+        return new ElementMetadata(_properties, _tags)
+        {
+            Version = Version
+        };
     }
 
     /// <summary>

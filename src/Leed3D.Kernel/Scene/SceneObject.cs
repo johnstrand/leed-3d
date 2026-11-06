@@ -57,4 +57,44 @@ public sealed class SceneObject
             Locked = Locked
         };
     }
+
+    /// <summary>
+    /// Creates a snapshot copy of this SceneObject, structurally sharing its cached snapshot <see cref="EditableMesh"/>
+    /// when the mesh has not changed since the last snapshot.
+    /// </summary>
+    public SceneObject CloneForSnapshot()
+    {
+        return new SceneObject(Id, Name, Mesh?.GetOrCreateSnapshotClone(), Transform.Clone(), Metadata.Clone())
+        {
+            Visible = Visible,
+            Locked = Locked
+        };
+    }
+
+    /// <summary>
+    /// Restores a live working copy of this snapshot SceneObject, reusing <paramref name="existingLiveObject"/>'s
+    /// mesh when it is still structurally identical to this snapshot's mesh.
+    /// </summary>
+    public SceneObject CloneFromSnapshot(SceneObject? existingLiveObject = null)
+    {
+        EditableMesh? restoredMesh = null;
+        if (Mesh is not null)
+        {
+            if (existingLiveObject?.Mesh is not null &&
+                existingLiveObject.Mesh.CanReuseForSnapshotRestore(Mesh))
+            {
+                restoredMesh = existingLiveObject.Mesh;
+            }
+            else
+            {
+                restoredMesh = Mesh.CloneFromSnapshot();
+            }
+        }
+
+        return new SceneObject(Id, Name, restoredMesh, Transform.Clone(), Metadata.Clone())
+        {
+            Visible = Visible,
+            Locked = Locked
+        };
+    }
 }

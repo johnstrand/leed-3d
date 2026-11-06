@@ -59,6 +59,18 @@ public sealed class FaceUvMapping
         TextureLock = textureLock;
     }
 
+    public bool ValueEquals(FaceUvMapping? other)
+    {
+        if (other is null) return false;
+        if (ReferenceEquals(this, other)) return true;
+        return UAxis == other.UAxis &&
+               VAxis == other.VAxis &&
+               Offset == other.Offset &&
+               Scale == other.Scale &&
+               RotationDegrees == other.RotationDegrees &&
+               TextureLock == other.TextureLock;
+    }
+
     /// <summary>
     /// Creates a deep copy of this <see cref="FaceUvMapping"/>.
     /// </summary>

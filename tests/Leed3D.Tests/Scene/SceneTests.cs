@@ -280,4 +280,40 @@ public class SceneTests
         Assert.Empty(selection.SelectedObjectIds);
         Assert.Null(selection.ActiveObjectId);
     }
+
+    [Fact]
+    public void EditorScene_CloneSnapshot_StructurallySharesUnmodifiedMeshesAcrossSnapshots()
+    {
+        var scene = new EditorScene("StructuralSharingScene");
+        SceneObject objA = scene.AddMeshObject("A", PrimitiveGenerator.CreateBox(new Vector3(2, 2, 2)));
+        SceneObject objB = scene.AddMeshObject("B", PrimitiveGenerator.CreateBox(new Vector3(4, 4, 4)));
+
+        EditorScene snap1 = scene.CloneSnapshot();
+
+        // Live meshes are distinct instances from snapshot meshes so in-place live edits are isolated
+        Assert.NotSame(objA.Mesh, snap1.GetObject(objA.Id)!.Mesh);
+        Assert.NotSame(objB.Mesh, snap1.GetObject(objB.Id)!.Mesh);
+
+        // Mutate only objA's mesh; leave objB's mesh untouched
+        int v0Id = objA.Mesh!.Vertices[0].Id;
+        Vector3 originalV0Pos = objA.Mesh.Vertices[0].Position;
+        Vector3 modifiedV0Pos = originalV0Pos + new Vector3(5, 0, 0);
+        objA.Mesh.SetVertexPosition(v0Id, modifiedV0Pos);
+
+        EditorScene snap2 = scene.CloneSnapshot();
+
+        // objB's mesh was unmodified, so snap1 and snap2 share the exact same snapshot EditableMesh instance!
+        Assert.Same(snap1.GetObject(objB.Id)!.Mesh, snap2.GetObject(objB.Id)!.Mesh);
+
+        // objA's mesh was modified, so snap2 has a new snapshot EditableMesh instance and snap1 is uncorrupted
+        Assert.NotSame(snap1.GetObject(objA.Id)!.Mesh, snap2.GetObject(objA.Id)!.Mesh);
+        Assert.Equal(originalV0Pos, snap1.GetObject(objA.Id)!.Mesh!.GetVertex(v0Id)!.Position);
+        Assert.Equal(modifiedV0Pos, snap2.GetObject(objA.Id)!.Mesh!.GetVertex(v0Id)!.Position);
+
+        // Restoring snap1 reuses objB's live mesh instance without reallocating while restoring objA's mesh
+        var liveMeshBBeforeRestore = objB.Mesh;
+        scene.RestoreFromSnapshot(snap1);
+        Assert.Same(liveMeshBBeforeRestore, scene.GetObject(objB.Id)!.Mesh);
+        Assert.Equal(originalV0Pos, scene.GetObject(objA.Id)!.Mesh!.GetVertex(v0Id)!.Position);
+    }
 }

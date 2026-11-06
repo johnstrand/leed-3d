@@ -327,6 +327,8 @@ public sealed class EditableMesh
     private TopologyGraph? _cachedTopology;
     private BoundingBox3D? _cachedBounds;
     private IReadOnlyList<(string MaterialId, IReadOnlyList<PolygonFace> Faces)>? _cachedFacesByMaterial;
+    private EditableMesh? _cachedSnapshotClone;
+    private int _cachedSnapshotVersion = -1;
 
     /// <summary>
     /// Monotonically increasing version counter incremented whenever vertices, faces, or topology change.
@@ -571,6 +573,107 @@ public sealed class EditableMesh
         }
 
         return copy;
+    }
+
+    /// <summary>
+    /// Returns a snapshot clone of this mesh, reusing the previously cached snapshot clone when this mesh
+    /// has not been modified since the last snapshot.
+    /// </summary>
+    public EditableMesh GetOrCreateSnapshotClone()
+    {
+        if (_cachedSnapshotClone is not null && IsSnapshotCloneUpToDate(_cachedSnapshotClone))
+        {
+            return _cachedSnapshotClone;
+        }
+
+        EditableMesh clone = Clone();
+        clone._cachedSnapshotClone = clone;
+        clone._cachedSnapshotVersion = clone.Version;
+
+        _cachedSnapshotClone = clone;
+        _cachedSnapshotVersion = Version;
+        return clone;
+    }
+
+    /// <summary>
+    /// Creates a mutable working copy of this snapshot mesh while seeding its cached snapshot pointer
+    /// back to this snapshot so subsequent snapshots of an unmodified mesh require zero cloning.
+    /// </summary>
+    public EditableMesh CloneFromSnapshot()
+    {
+        EditableMesh copy = Clone();
+        copy._cachedSnapshotClone = this;
+        copy._cachedSnapshotVersion = copy.Version;
+        _cachedSnapshotClone = this;
+        _cachedSnapshotVersion = Version;
+        return copy;
+    }
+
+    internal bool CanReuseForSnapshotRestore(EditableMesh snapshotMesh)
+    {
+        return !ReferenceEquals(this, snapshotMesh) &&
+               ReferenceEquals(_cachedSnapshotClone, snapshotMesh) &&
+               IsSnapshotCloneUpToDate(snapshotMesh);
+    }
+
+    private bool IsSnapshotCloneUpToDate(EditableMesh snapshot)
+    {
+        if (_cachedSnapshotVersion != Version ||
+            snapshot.Version != Version ||
+            snapshot._vertices.Count != _vertices.Count ||
+            snapshot._faces.Count != _faces.Count ||
+            snapshot._edgeMetadata.Count != _edgeMetadata.Count)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < _vertices.Count; i++)
+        {
+            MeshVertex curr = _vertices[i];
+            MeshVertex snap = snapshot._vertices[i];
+            if (curr.Id != snap.Id ||
+                curr.Position != snap.Position ||
+                curr.Metadata.Version != snap.Metadata.Version)
+            {
+                return false;
+            }
+        }
+
+        for (int i = 0; i < _faces.Count; i++)
+        {
+            PolygonFace curr = _faces[i];
+            PolygonFace snap = snapshot._faces[i];
+            if (curr.Id != snap.Id ||
+                !string.Equals(curr.MaterialId, snap.MaterialId, StringComparison.Ordinal) ||
+                curr.Metadata.Version != snap.Metadata.Version ||
+                !curr.UvMapping.ValueEquals(snap.UvMapping) ||
+                curr.VertexIds.Count != snap.VertexIds.Count)
+            {
+                return false;
+            }
+
+            for (int j = 0; j < curr.VertexIds.Count; j++)
+            {
+                if (curr.VertexIds[j] != snap.VertexIds[j])
+                {
+                    return false;
+                }
+            }
+        }
+
+        if (_edgeMetadata.Count > 0)
+        {
+            foreach (var (edge, meta) in _edgeMetadata)
+            {
+                if (!snapshot._edgeMetadata.TryGetValue(edge, out ElementMetadata? snapMeta) ||
+                    meta.Version != snapMeta.Version)
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
     }
 
     /// <summary>

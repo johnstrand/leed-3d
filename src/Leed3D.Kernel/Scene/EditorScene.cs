@@ -214,7 +214,7 @@ public sealed class EditorScene
 
         for (int i = 0; i < _objects.Count; i++)
         {
-            SceneObject clonedObj = _objects[i].Clone();
+            SceneObject clonedObj = _objects[i].CloneForSnapshot();
             snapshot._objects.Add(clonedObj);
             snapshot._objectsById[clonedObj.Id] = clonedObj;
         }
@@ -240,12 +240,15 @@ public sealed class EditorScene
         _nextObjectId = snapshot._nextObjectId;
         _nextEntityId = snapshot._nextEntityId;
 
+        var previousObjectsById = new Dictionary<int, SceneObject>(_objectsById);
         _objectsById.Clear();
         _objects.Clear();
 
         for (int i = 0; i < snapshot._objects.Count; i++)
         {
-            SceneObject clonedObj = snapshot._objects[i].Clone();
+            SceneObject snapObj = snapshot._objects[i];
+            previousObjectsById.TryGetValue(snapObj.Id, out SceneObject? existingLiveObj);
+            SceneObject clonedObj = snapObj.CloneFromSnapshot(existingLiveObj);
             _objects.Add(clonedObj);
             _objectsById[clonedObj.Id] = clonedObj;
         }
