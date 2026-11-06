@@ -349,6 +349,256 @@ public sealed class TopologyGraph
     }
 
     /// <summary>
+    /// Computes the ordered topological edge loop passing through <paramref name="startEdge"/>.
+    /// Walks across 4-valence manifold vertices (taking the unique opposite edge that shares no incident face)
+    /// or along open boundary edges if <paramref name="startEdge"/> is a boundary edge.
+    /// </summary>
+    public IReadOnlyList<EdgeKey> GetEdgeLoop(EdgeKey startEdge)
+    {
+        if (!_edgesByKey.TryGetValue(startEdge, out TopologyEdge? startTopoEdge))
+        {
+            return [];
+        }
+
+        var result = new List<EdgeKey> { startEdge };
+        var visited = new HashSet<EdgeKey> { startEdge };
+
+        if (startTopoEdge.IsBoundary)
+        {
+            WalkBoundaryLoopDirection(startEdge, startEdge.VMax, visited, result, appendAtEnd: true);
+            WalkBoundaryLoopDirection(startEdge, startEdge.VMin, visited, result, appendAtEnd: false);
+            return result;
+        }
+
+        WalkInteriorLoopDirection(startEdge, startEdge.VMax, visited, result, appendAtEnd: true);
+        WalkInteriorLoopDirection(startEdge, startEdge.VMin, visited, result, appendAtEnd: false);
+        return result;
+    }
+
+    private void WalkBoundaryLoopDirection(
+        EdgeKey currentEdge,
+        int currentVertex,
+        HashSet<EdgeKey> visited,
+        List<EdgeKey> result,
+        bool appendAtEnd)
+    {
+        while (true)
+        {
+            IReadOnlyList<int> neighbors = GetVertexConnectedVertices(currentVertex);
+            EdgeKey? nextBoundaryEdge = null;
+            int nextVertex = -1;
+            int boundaryCandidateCount = 0;
+
+            for (int i = 0; i < neighbors.Count; i++)
+            {
+                int candVert = neighbors[i];
+                var candKey = new EdgeKey(currentVertex, candVert);
+                if (candKey == currentEdge)
+                {
+                    continue;
+                }
+
+                if (_edgesByKey.TryGetValue(candKey, out TopologyEdge? candTopo) && candTopo.IsBoundary)
+                {
+                    boundaryCandidateCount++;
+                    nextBoundaryEdge = candKey;
+                    nextVertex = candVert;
+                }
+            }
+
+            if (boundaryCandidateCount != 1 || !nextBoundaryEdge.HasValue || !visited.Add(nextBoundaryEdge.Value))
+            {
+                break;
+            }
+
+            if (appendAtEnd)
+            {
+                result.Add(nextBoundaryEdge.Value);
+            }
+            else
+            {
+                result.Insert(0, nextBoundaryEdge.Value);
+            }
+
+            currentEdge = nextBoundaryEdge.Value;
+            currentVertex = nextVertex;
+        }
+    }
+
+    private void WalkInteriorLoopDirection(
+        EdgeKey currentEdge,
+        int currentVertex,
+        HashSet<EdgeKey> visited,
+        List<EdgeKey> result,
+        bool appendAtEnd)
+    {
+        while (true)
+        {
+            if (!_edgesByKey.TryGetValue(currentEdge, out TopologyEdge? currTopo))
+            {
+                break;
+            }
+
+            IReadOnlyList<int> neighbors = GetVertexConnectedVertices(currentVertex);
+            IReadOnlyList<int> vertexFaces = GetVertexIncidentFaces(currentVertex);
+
+            // Standard manifold quad-grid vertex has 4 connected edges and 4 incident faces
+            if (neighbors.Count != 4 || vertexFaces.Count != 4)
+            {
+                break;
+            }
+
+            EdgeKey? oppositeEdge = null;
+            int nextVertex = -1;
+            int candidateCount = 0;
+
+            for (int i = 0; i < neighbors.Count; i++)
+            {
+                int candVert = neighbors[i];
+                var candKey = new EdgeKey(currentVertex, candVert);
+                if (candKey == currentEdge || !_edgesByKey.TryGetValue(candKey, out TopologyEdge? candTopo))
+                {
+                    continue;
+                }
+
+                bool sharesFace = false;
+                for (int fA = 0; fA < currTopo.IncidentFaceIds.Count && !sharesFace; fA++)
+                {
+                    int faceId = currTopo.IncidentFaceIds[fA];
+                    for (int fB = 0; fB < candTopo.IncidentFaceIds.Count; fB++)
+                    {
+                        if (candTopo.IncidentFaceIds[fB] == faceId)
+                        {
+                            sharesFace = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (!sharesFace)
+                {
+                    candidateCount++;
+                    oppositeEdge = candKey;
+                    nextVertex = candVert;
+                }
+            }
+
+            if (candidateCount != 1 || !oppositeEdge.HasValue || !visited.Add(oppositeEdge.Value))
+            {
+                break;
+            }
+
+            if (appendAtEnd)
+            {
+                result.Add(oppositeEdge.Value);
+            }
+            else
+            {
+                result.Insert(0, oppositeEdge.Value);
+            }
+
+            currentEdge = oppositeEdge.Value;
+            currentVertex = nextVertex;
+        }
+    }
+
+    /// <summary>
+    /// Computes the ordered topological edge ring passing through <paramref name="startEdge"/>
+    /// by walking across opposite edges of quad faces (<c>VertexIds.Count == 4</c>).
+    /// </summary>
+    public IReadOnlyList<EdgeKey> GetEdgeRing(EdgeKey startEdge)
+    {
+        if (!_edgesByKey.TryGetValue(startEdge, out TopologyEdge? startTopoEdge))
+        {
+            return [];
+        }
+
+        var result = new List<EdgeKey> { startEdge };
+        var visited = new HashSet<EdgeKey> { startEdge };
+
+        if (startTopoEdge.IncidentFaceIds.Count >= 1)
+        {
+            WalkEdgeRingDirection(startEdge, startTopoEdge.IncidentFaceIds[0], visited, result, appendAtEnd: true);
+        }
+
+        if (startTopoEdge.IncidentFaceIds.Count >= 2)
+        {
+            WalkEdgeRingDirection(startEdge, startTopoEdge.IncidentFaceIds[1], visited, result, appendAtEnd: false);
+        }
+
+        return result;
+    }
+
+    private void WalkEdgeRingDirection(
+        EdgeKey currentEdge,
+        int currentFaceId,
+        HashSet<EdgeKey> visited,
+        List<EdgeKey> result,
+        bool appendAtEnd)
+    {
+        while (true)
+        {
+            if (!_faceHalfEdgeIds.TryGetValue(currentFaceId, out List<int>? heIds) || heIds.Count != 4)
+            {
+                break;
+            }
+
+            int edgeIndexInQuad = -1;
+            for (int i = 0; i < 4; i++)
+            {
+                if (_halfEdges[heIds[i]].EdgeKey == currentEdge)
+                {
+                    edgeIndexInQuad = i;
+                    break;
+                }
+            }
+
+            if (edgeIndexInQuad < 0)
+            {
+                break;
+            }
+
+            EdgeKey oppositeEdge = _halfEdges[heIds[(edgeIndexInQuad + 2) % 4]].EdgeKey;
+            if (!visited.Add(oppositeEdge))
+            {
+                break;
+            }
+
+            if (appendAtEnd)
+            {
+                result.Add(oppositeEdge);
+            }
+            else
+            {
+                result.Insert(0, oppositeEdge);
+            }
+
+            if (!_edgesByKey.TryGetValue(oppositeEdge, out TopologyEdge? oppTopo))
+            {
+                break;
+            }
+
+            int nextFaceId = -1;
+            for (int i = 0; i < oppTopo.IncidentFaceIds.Count; i++)
+            {
+                if (oppTopo.IncidentFaceIds[i] != currentFaceId)
+                {
+                    nextFaceId = oppTopo.IncidentFaceIds[i];
+                    break;
+                }
+            }
+
+            if (nextFaceId < 0)
+            {
+                break;
+            }
+
+            currentEdge = oppositeEdge;
+            currentFaceId = nextFaceId;
+        }
+    }
+
+    /// <summary>
     /// Returns true if the mesh has at least one face and every undirected edge has
     /// exactly 2 incident faces traversing the shared edge in opposite directions.
     /// </summary>

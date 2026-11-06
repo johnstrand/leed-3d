@@ -462,6 +462,46 @@ public sealed class EditorShortcutHandler
                 return;
             }
 
+            // Edit Mode Selection Operators: Select Linked (Ctrl+L), Grow (Ctrl++), Shrink (Ctrl+-), Coplanar (Shift+G)
+            if (_app.Selection.Mode != InteractionMode.Object)
+            {
+                if (ctrl && !shift && !alt && Raylib.IsKeyPressed(KeyboardKey.L))
+                {
+                    if (_app.Selection.SelectLinked(_app.Scene))
+                    {
+                        _app.StatusMessage = $"Selected linked {_app.Selection.Mode} elements (Ctrl+L).";
+                    }
+                    return;
+                }
+
+                if (ctrl && !shift && !alt && (Raylib.IsKeyPressed(KeyboardKey.Equal) || Raylib.IsKeyPressed(KeyboardKey.KpAdd)))
+                {
+                    if (_app.Selection.GrowSelection(_app.Scene))
+                    {
+                        _app.StatusMessage = $"Grew {_app.Selection.Mode} selection.";
+                    }
+                    return;
+                }
+
+                if (ctrl && !shift && !alt && (Raylib.IsKeyPressed(KeyboardKey.Minus) || Raylib.IsKeyPressed(KeyboardKey.KpSubtract)))
+                {
+                    if (_app.Selection.ShrinkSelection(_app.Scene))
+                    {
+                        _app.StatusMessage = $"Shrank {_app.Selection.Mode} selection.";
+                    }
+                    return;
+                }
+
+                if (shift && !ctrl && !alt && _app.Selection.Mode == InteractionMode.Face && Raylib.IsKeyPressed(KeyboardKey.G))
+                {
+                    if (_app.Selection.SelectCoplanarFaces(_app.Scene))
+                    {
+                        _app.StatusMessage = $"Selected {(_app.Selection.SelectedFaceIds.Count)} coplanar face(s) (Shift+G).";
+                    }
+                    return;
+                }
+            }
+
             // CSG Boolean Hotkeys (in Object Mode):
             // Ctrl+= : Union
             // Ctrl+- : Subtract / Carve

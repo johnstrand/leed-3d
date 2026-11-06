@@ -896,4 +896,492 @@ public sealed class SelectionManager
         if (!ActiveObjectId.HasValue) return null;
         return scene.GetObject(ActiveObjectId.Value)?.Mesh;
     }
+
+    /// <summary>
+    /// Selects the topological edge loop passing through <paramref name="edge"/> on the active mesh.
+    /// If <paramref name="additive"/> is false, replaces the current edge selection; otherwise toggles/adds the loop.
+    /// </summary>
+    public bool SelectEdgeLoop(EditorScene scene, EdgeKey edge, bool additive = false)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        if (GetActiveMesh(scene) is not { } mesh)
+        {
+            return false;
+        }
+
+        IReadOnlyList<EdgeKey> loop = mesh.GetTopology().GetEdgeLoop(edge);
+        if (loop.Count == 0)
+        {
+            return false;
+        }
+
+        if (!additive)
+        {
+            _selectedEdges.Clear();
+            for (int i = 0; i < loop.Count; i++)
+            {
+                _selectedEdges.Add(loop[i]);
+            }
+        }
+        else
+        {
+            bool allAlreadySelected = true;
+            for (int i = 0; i < loop.Count; i++)
+            {
+                if (!_selectedEdges.Contains(loop[i]))
+                {
+                    allAlreadySelected = false;
+                    break;
+                }
+            }
+
+            for (int i = 0; i < loop.Count; i++)
+            {
+                if (allAlreadySelected)
+                {
+                    _selectedEdges.Remove(loop[i]);
+                }
+                else
+                {
+                    _selectedEdges.Add(loop[i]);
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Selects the topological edge ring passing through <paramref name="edge"/> on the active mesh.
+    /// If <paramref name="additive"/> is false, replaces the current edge selection; otherwise toggles/adds the ring.
+    /// </summary>
+    public bool SelectEdgeRing(EditorScene scene, EdgeKey edge, bool additive = false)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        if (GetActiveMesh(scene) is not { } mesh)
+        {
+            return false;
+        }
+
+        IReadOnlyList<EdgeKey> ring = mesh.GetTopology().GetEdgeRing(edge);
+        if (ring.Count == 0)
+        {
+            return false;
+        }
+
+        if (!additive)
+        {
+            _selectedEdges.Clear();
+            for (int i = 0; i < ring.Count; i++)
+            {
+                _selectedEdges.Add(ring[i]);
+            }
+        }
+        else
+        {
+            bool allAlreadySelected = true;
+            for (int i = 0; i < ring.Count; i++)
+            {
+                if (!_selectedEdges.Contains(ring[i]))
+                {
+                    allAlreadySelected = false;
+                    break;
+                }
+            }
+
+            for (int i = 0; i < ring.Count; i++)
+            {
+                if (allAlreadySelected)
+                {
+                    _selectedEdges.Remove(ring[i]);
+                }
+                else
+                {
+                    _selectedEdges.Add(ring[i]);
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Expands the current Vertex, Edge, or Face selection by one topological ring of adjacent elements.
+    /// </summary>
+    public bool GrowSelection(EditorScene scene)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        if (GetActiveMesh(scene) is not { } mesh)
+        {
+            return false;
+        }
+
+        TopologyGraph topology = mesh.GetTopology();
+
+        switch (Mode)
+        {
+            case InteractionMode.Vertex:
+            {
+                if (_selectedVertexIds.Count == 0) return false;
+                var toAdd = new HashSet<int>();
+                foreach (int vId in _selectedVertexIds)
+                {
+                    IReadOnlyList<int> neighbors = topology.GetVertexConnectedVertices(vId);
+                    for (int i = 0; i < neighbors.Count; i++)
+                    {
+                        toAdd.Add(neighbors[i]);
+                    }
+                }
+
+                int before = _selectedVertexIds.Count;
+                foreach (int vId in toAdd)
+                {
+                    _selectedVertexIds.Add(vId);
+                }
+                return _selectedVertexIds.Count > before;
+            }
+
+            case InteractionMode.Edge:
+            {
+                if (_selectedEdges.Count == 0) return false;
+                var selectedVerts = new HashSet<int>();
+                foreach (EdgeKey e in _selectedEdges)
+                {
+                    selectedVerts.Add(e.VMin);
+                    selectedVerts.Add(e.VMax);
+                }
+
+                int before = _selectedEdges.Count;
+                for (int i = 0; i < topology.Edges.Count; i++)
+                {
+                    EdgeKey key = topology.Edges[i].Key;
+                    if (selectedVerts.Contains(key.VMin) || selectedVerts.Contains(key.VMax))
+                    {
+                        _selectedEdges.Add(key);
+                    }
+                }
+                return _selectedEdges.Count > before;
+            }
+
+            case InteractionMode.Face:
+            {
+                if (_selectedFaceIds.Count == 0) return false;
+                var toAdd = new HashSet<int>();
+                foreach (int fId in _selectedFaceIds)
+                {
+                    IReadOnlyList<int> adjFaces = topology.GetFaceAdjacentFaces(fId);
+                    for (int i = 0; i < adjFaces.Count; i++)
+                    {
+                        toAdd.Add(adjFaces[i]);
+                    }
+                }
+
+                int before = _selectedFaceIds.Count;
+                foreach (int fId in toAdd)
+                {
+                    _selectedFaceIds.Add(fId);
+                }
+                return _selectedFaceIds.Count > before;
+            }
+
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Contracts the current Vertex, Edge, or Face selection by deselecting elements on the outer boundary of the selection.
+    /// </summary>
+    public bool ShrinkSelection(EditorScene scene)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        if (GetActiveMesh(scene) is not { } mesh)
+        {
+            return false;
+        }
+
+        TopologyGraph topology = mesh.GetTopology();
+
+        switch (Mode)
+        {
+            case InteractionMode.Vertex:
+            {
+                if (_selectedVertexIds.Count == 0) return false;
+                var toRemove = new List<int>();
+                foreach (int vId in _selectedVertexIds)
+                {
+                    IReadOnlyList<int> neighbors = topology.GetVertexConnectedVertices(vId);
+                    bool hasUnselectedNeighbor = neighbors.Count == 0;
+                    for (int i = 0; i < neighbors.Count; i++)
+                    {
+                        if (!_selectedVertexIds.Contains(neighbors[i]))
+                        {
+                            hasUnselectedNeighbor = true;
+                            break;
+                        }
+                    }
+
+                    if (hasUnselectedNeighbor)
+                    {
+                        toRemove.Add(vId);
+                    }
+                }
+
+                for (int i = 0; i < toRemove.Count; i++)
+                {
+                    _selectedVertexIds.Remove(toRemove[i]);
+                }
+                return toRemove.Count > 0;
+            }
+
+            case InteractionMode.Edge:
+            {
+                if (_selectedEdges.Count == 0) return false;
+                var unselectedEndpointVertices = new HashSet<int>();
+                for (int i = 0; i < topology.Edges.Count; i++)
+                {
+                    EdgeKey key = topology.Edges[i].Key;
+                    if (!_selectedEdges.Contains(key))
+                    {
+                        unselectedEndpointVertices.Add(key.VMin);
+                        unselectedEndpointVertices.Add(key.VMax);
+                    }
+                }
+
+                var toRemove = new List<EdgeKey>();
+                foreach (EdgeKey edge in _selectedEdges)
+                {
+                    if (unselectedEndpointVertices.Contains(edge.VMin) || unselectedEndpointVertices.Contains(edge.VMax))
+                    {
+                        toRemove.Add(edge);
+                    }
+                }
+
+                for (int i = 0; i < toRemove.Count; i++)
+                {
+                    _selectedEdges.Remove(toRemove[i]);
+                }
+                return toRemove.Count > 0;
+            }
+
+            case InteractionMode.Face:
+            {
+                if (_selectedFaceIds.Count == 0) return false;
+                var toRemove = new List<int>();
+                foreach (int fId in _selectedFaceIds)
+                {
+                    IReadOnlyList<int> adjFaces = topology.GetFaceAdjacentFaces(fId);
+                    bool hasUnselectedNeighbor = adjFaces.Count == 0;
+                    for (int i = 0; i < adjFaces.Count; i++)
+                    {
+                        if (!_selectedFaceIds.Contains(adjFaces[i]))
+                        {
+                            hasUnselectedNeighbor = true;
+                            break;
+                        }
+                    }
+
+                    if (hasUnselectedNeighbor)
+                    {
+                        toRemove.Add(fId);
+                    }
+                }
+
+                for (int i = 0; i < toRemove.Count; i++)
+                {
+                    _selectedFaceIds.Remove(toRemove[i]);
+                }
+                return toRemove.Count > 0;
+            }
+
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Flood-fill selects all vertices, edges, or faces in the same connected topological component(s)
+    /// as the current sub-element selection (<c>Ctrl+L</c>).
+    /// </summary>
+    public bool SelectLinked(EditorScene scene)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        if (GetActiveMesh(scene) is not { } mesh)
+        {
+            return false;
+        }
+
+        TopologyGraph topology = mesh.GetTopology();
+
+        switch (Mode)
+        {
+            case InteractionMode.Vertex:
+            {
+                if (_selectedVertexIds.Count == 0) return false;
+                var queue = new Queue<int>(_selectedVertexIds);
+                while (queue.Count > 0)
+                {
+                    int curr = queue.Dequeue();
+                    IReadOnlyList<int> neighbors = topology.GetVertexConnectedVertices(curr);
+                    for (int i = 0; i < neighbors.Count; i++)
+                    {
+                        int n = neighbors[i];
+                        if (_selectedVertexIds.Add(n))
+                        {
+                            queue.Enqueue(n);
+                        }
+                    }
+                }
+                return true;
+            }
+
+            case InteractionMode.Edge:
+            {
+                if (_selectedEdges.Count == 0) return false;
+                var visitedVerts = new HashSet<int>();
+                var queue = new Queue<int>();
+                foreach (EdgeKey e in _selectedEdges)
+                {
+                    if (visitedVerts.Add(e.VMin)) queue.Enqueue(e.VMin);
+                    if (visitedVerts.Add(e.VMax)) queue.Enqueue(e.VMax);
+                }
+
+                while (queue.Count > 0)
+                {
+                    int curr = queue.Dequeue();
+                    IReadOnlyList<int> neighbors = topology.GetVertexConnectedVertices(curr);
+                    for (int i = 0; i < neighbors.Count; i++)
+                    {
+                        int n = neighbors[i];
+                        _selectedEdges.Add(new EdgeKey(curr, n));
+                        if (visitedVerts.Add(n))
+                        {
+                            queue.Enqueue(n);
+                        }
+                    }
+                }
+                return true;
+            }
+
+            case InteractionMode.Face:
+            {
+                if (_selectedFaceIds.Count == 0) return false;
+                var queue = new Queue<int>(_selectedFaceIds);
+                while (queue.Count > 0)
+                {
+                    int curr = queue.Dequeue();
+                    IReadOnlyList<int> adjFaces = topology.GetFaceAdjacentFaces(curr);
+                    for (int i = 0; i < adjFaces.Count; i++)
+                    {
+                        int adj = adjFaces[i];
+                        if (_selectedFaceIds.Add(adj))
+                        {
+                            queue.Enqueue(adj);
+                        }
+                    }
+                }
+                return true;
+            }
+
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// In Face mode, selects all faces on the active mesh whose normal is within <paramref name="angleToleranceDegrees"/>
+    /// of any currently selected face's normal (and optionally lying on the same plane within <paramref name="planeDistanceTolerance"/>).
+    /// </summary>
+    public bool SelectCoplanarFaces(
+        EditorScene scene,
+        float angleToleranceDegrees = 1.0f,
+        bool requireSamePlane = true,
+        float planeDistanceTolerance = 1e-3f)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        if (Mode != InteractionMode.Face || _selectedFaceIds.Count == 0 || GetActiveMesh(scene) is not { } mesh)
+        {
+            return false;
+        }
+
+        float cosThreshold = MathF.Cos(angleToleranceDegrees * (MathF.PI / 180.0f));
+        var seeds = new List<(Vector3 Normal, Vector3 Centroid)>(_selectedFaceIds.Count);
+        foreach (int fId in _selectedFaceIds)
+        {
+            if (mesh.GetFace(fId) is { } face)
+            {
+                seeds.Add((face.ComputeNormal(mesh), face.ComputeCentroid(mesh)));
+            }
+        }
+
+        if (seeds.Count == 0)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < mesh.Faces.Count; i++)
+        {
+            PolygonFace candidate = mesh.Faces[i];
+            if (_selectedFaceIds.Contains(candidate.Id))
+            {
+                continue;
+            }
+
+            Vector3 candNormal = candidate.ComputeNormal(mesh);
+            Vector3 candCentroid = candidate.ComputeCentroid(mesh);
+
+            for (int s = 0; s < seeds.Count; s++)
+            {
+                var (seedNormal, seedCentroid) = seeds[s];
+                if (Vector3.Dot(seedNormal, candNormal) >= cosThreshold)
+                {
+                    if (!requireSamePlane || MathF.Abs(Vector3.Dot(seedNormal, candCentroid - seedCentroid)) <= planeDistanceTolerance)
+                    {
+                        _selectedFaceIds.Add(candidate.Id);
+                        break;
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// In Face mode, selects all faces on the active mesh that share the <see cref="PolygonFace.MaterialId"/>
+    /// of any currently selected face.
+    /// </summary>
+    public bool SelectFacesByMaterial(EditorScene scene)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        if (Mode != InteractionMode.Face || _selectedFaceIds.Count == 0 || GetActiveMesh(scene) is not { } mesh)
+        {
+            return false;
+        }
+
+        var targetMaterials = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (int fId in _selectedFaceIds)
+        {
+            if (mesh.GetFace(fId) is { } face)
+            {
+                targetMaterials.Add(face.MaterialId);
+            }
+        }
+
+        if (targetMaterials.Count == 0)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < mesh.Faces.Count; i++)
+        {
+            PolygonFace face = mesh.Faces[i];
+            if (targetMaterials.Contains(face.MaterialId))
+            {
+                _selectedFaceIds.Add(face.Id);
+            }
+        }
+
+        return true;
+    }
 }

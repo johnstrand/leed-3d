@@ -1433,6 +1433,14 @@ public sealed class EditorApp : IDisposable
             if (ImGui.Button("Dissolve")) EditController.ExecuteDissolveVertices(Scene, Selection, UndoStack);
             ImGui.SameLine();
             if (ImGui.Button("Delete (X)")) ShortcutHandler.OpenDeletePopupRequested = true;
+            ImGui.SameLine();
+            ImGui.TextDisabled("| Select:");
+            ImGui.SameLine();
+            if (ImGui.Button("Grow (Ctrl++)")) Selection.GrowSelection(Scene);
+            ImGui.SameLine();
+            if (ImGui.Button("Shrink (Ctrl+-)")) Selection.ShrinkSelection(Scene);
+            ImGui.SameLine();
+            if (ImGui.Button("Linked (Ctrl+L)")) Selection.SelectLinked(Scene);
         }
         else if (Selection.Mode == InteractionMode.Edge)
         {
@@ -1449,6 +1457,24 @@ public sealed class EditorApp : IDisposable
             if (ImGui.Button("Dissolve")) EditController.ExecuteDissolveEdges(Scene, Selection, UndoStack);
             ImGui.SameLine();
             if (ImGui.Button("Delete (X)")) ShortcutHandler.OpenDeletePopupRequested = true;
+            ImGui.SameLine();
+            ImGui.TextDisabled("| Select:");
+            ImGui.SameLine();
+            if (ImGui.Button("Loop (Alt+Click)") && Selection.SelectedEdges.Count > 0)
+            {
+                Selection.SelectEdgeLoop(Scene, Selection.SelectedEdges.First(), additive: true);
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Ring (Ctrl+Alt+Click)") && Selection.SelectedEdges.Count > 0)
+            {
+                Selection.SelectEdgeRing(Scene, Selection.SelectedEdges.First(), additive: true);
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Grow (Ctrl++)")) Selection.GrowSelection(Scene);
+            ImGui.SameLine();
+            if (ImGui.Button("Shrink (Ctrl+-)")) Selection.ShrinkSelection(Scene);
+            ImGui.SameLine();
+            if (ImGui.Button("Linked (Ctrl+L)")) Selection.SelectLinked(Scene);
         }
         else if (Selection.Mode == InteractionMode.Face)
         {
@@ -1476,6 +1502,18 @@ public sealed class EditorApp : IDisposable
             if (ImGui.Button("Normals (Alt+N)...")) ShortcutHandler.OpenNormalsPopupRequested = true;
             ImGui.SameLine();
             if (ImGui.Button("Subdivide...")) ShortcutHandler.OpenSubdividePopupRequested = true;
+            ImGui.SameLine();
+            ImGui.TextDisabled("| Select:");
+            ImGui.SameLine();
+            if (ImGui.Button("Grow (Ctrl++)")) Selection.GrowSelection(Scene);
+            ImGui.SameLine();
+            if (ImGui.Button("Shrink (Ctrl+-)")) Selection.ShrinkSelection(Scene);
+            ImGui.SameLine();
+            if (ImGui.Button("Linked (Ctrl+L)")) Selection.SelectLinked(Scene);
+            ImGui.SameLine();
+            if (ImGui.Button("Coplanar (Shift+G)")) Selection.SelectCoplanarFaces(Scene);
+            ImGui.SameLine();
+            if (ImGui.Button("Same Mat")) Selection.SelectFacesByMaterial(Scene);
         }
 
         ImGui.Separator();
@@ -2050,16 +2088,29 @@ public sealed class EditorApp : IDisposable
 
                     if (pickedEdge.HasValue)
                     {
-                        if (shiftHeld)
+                        bool altHeld = Raylib.IsKeyDown(KeyboardKey.LeftAlt) || Raylib.IsKeyDown(KeyboardKey.RightAlt);
+                        bool ctrlHeld = Raylib.IsKeyDown(KeyboardKey.LeftControl) || Raylib.IsKeyDown(KeyboardKey.RightControl);
+
+                        if (altHeld && ctrlHeld)
+                        {
+                            Selection.SelectEdgeRing(Scene, pickedEdge.Value, additive: shiftHeld);
+                            _statusMessage = $"Selected Edge Ring from ({pickedEdge.Value.VMin}, {pickedEdge.Value.VMax}). Total: {Selection.SelectedEdges.Count} edge(s).";
+                        }
+                        else if (altHeld)
+                        {
+                            Selection.SelectEdgeLoop(Scene, pickedEdge.Value, additive: shiftHeld);
+                            _statusMessage = $"Selected Edge Loop from ({pickedEdge.Value.VMin}, {pickedEdge.Value.VMax}). Total: {Selection.SelectedEdges.Count} edge(s).";
+                        }
+                        else if (shiftHeld)
                         {
                             Selection.ToggleSelectEdge(pickedEdge.Value);
+                            _statusMessage = $"Selected Edge ({pickedEdge.Value.VMin}, {pickedEdge.Value.VMax}). Total: {Selection.SelectedEdges.Count}.";
                         }
                         else
                         {
                             Selection.SelectSingleEdge(pickedEdge.Value);
+                            _statusMessage = $"Selected Edge ({pickedEdge.Value.VMin}, {pickedEdge.Value.VMax}). Total: {Selection.SelectedEdges.Count}.";
                         }
-
-                        _statusMessage = $"Selected Edge ({pickedEdge.Value.VMin}, {pickedEdge.Value.VMax}). Total: {Selection.SelectedEdges.Count}.";
                     }
                     else if (!shiftHeld)
                     {

@@ -472,4 +472,89 @@ public sealed class SelectionAndPickingTests
         Assert.True(camera.FrameSelectionOrScene(scene, sm));
         Assert.True(Vector3.Distance(new Vector3(20f, 7f, -15f), camera.Target) < 1e-4f);
     }
+
+    [Fact]
+    public void TopologyGraph_And_SelectionManager_EdgeLoopAndEdgeRing_WorkOnCylinderAndBox()
+    {
+        var scene = new EditorScene();
+        // Cylinder with 8 radial segments and 2 height segments (middle ring of vertices has valence 4)
+        EditableMesh cylMesh = PrimitiveGenerator.CreateCylinder(new CylinderParams(1.0f, 2.0f, RadialSegments: 8, HeightSegments: 2));
+        SceneObject cylObj = scene.AddMeshObject("Cylinder", cylMesh);
+
+        var sm = new SelectionManager();
+        sm.SelectSingleObject(cylObj.Id);
+        sm.SetMode(InteractionMode.Edge, scene);
+
+        // Find a horizontal equator edge at Y == 0 (its endpoints both have Y near 0 and valence 4)
+        TopologyGraph topo = cylMesh.GetTopology();
+        EdgeKey equatorEdge = topo.Edges.First(e =>
+        {
+            Vector3 pA = cylMesh.GetVertex(e.Key.VMin)!.Position;
+            Vector3 pB = cylMesh.GetVertex(e.Key.VMax)!.Position;
+            return MathF.Abs(pA.Y) < 1e-3f && MathF.Abs(pB.Y) < 1e-3f;
+        }).Key;
+
+        // Edge Loop around the cylinder equator should select all 8 horizontal equator edges
+        Assert.True(sm.SelectEdgeLoop(scene, equatorEdge));
+        Assert.Equal(8, sm.SelectedEdges.Count);
+
+        // Find a vertical side edge on the lower half (one vertex at Y=-1, one at Y=0)
+        EdgeKey verticalEdge = topo.Edges.First(e =>
+        {
+            Vector3 pA = cylMesh.GetVertex(e.Key.VMin)!.Position;
+            Vector3 pB = cylMesh.GetVertex(e.Key.VMax)!.Position;
+            return MathF.Abs(pA.X - pB.X) < 1e-3f && MathF.Abs(pA.Z - pB.Z) < 1e-3f && pA.Y * pB.Y <= 0f && MathF.Abs(pA.Y - pB.Y) > 0.5f;
+        }).Key;
+
+        // Edge Ring around the cylinder side quads should select all 8 parallel vertical edges in that band
+        Assert.True(sm.SelectEdgeRing(scene, verticalEdge));
+        Assert.Equal(8, sm.SelectedEdges.Count);
+    }
+
+    [Fact]
+    public void SelectionManager_GrowShrinkLinkedCoplanarAndMaterial_WorkCorrectly()
+    {
+        var scene = new EditorScene();
+        // Subdivided box (2x2x2 segments -> 24 quad faces)
+        EditableMesh boxMesh = PrimitiveGenerator.CreateBox(new BoxParams(new Vector3(4, 4, 4), SegmentsX: 2, SegmentsY: 2, SegmentsZ: 2));
+        SceneObject boxObj = scene.AddMeshObject("SubBox", boxMesh);
+
+        var sm = new SelectionManager();
+        sm.SelectSingleObject(boxObj.Id);
+        sm.SetMode(InteractionMode.Face, scene);
+
+        // Pick one face on the +Y top side (there are 4 coplanar top faces)
+        PolygonFace topSubFace = boxMesh.Faces.First(f => f.ComputeNormal(boxMesh).Y > 0.9f);
+        sm.SelectSingleFace(topSubFace.Id);
+        Assert.Single(sm.SelectedFaceIds);
+
+        // SelectCoplanarFaces selects all 4 top faces
+        Assert.True(sm.SelectCoplanarFaces(scene));
+        Assert.Equal(4, sm.SelectedFaceIds.Count);
+
+        // GrowSelection expands from 4 top faces to include adjacent side faces (4 + 8 = 12)
+        Assert.True(sm.GrowSelection(scene));
+        Assert.Equal(12, sm.SelectedFaceIds.Count);
+
+        // ShrinkSelection contracts back to the 4 interior top faces
+        Assert.True(sm.ShrinkSelection(scene));
+        Assert.Equal(4, sm.SelectedFaceIds.Count);
+
+        // Add a second disconnected component to boxMesh and verify SelectLinked only selects the first component
+        int v0 = boxMesh.AddVertex(new Vector3(20, 0, 0));
+        int v1 = boxMesh.AddVertex(new Vector3(21, 0, 0));
+        int v2 = boxMesh.AddVertex(new Vector3(20, 1, 0));
+        int disconnectedFaceId = boxMesh.AddFace([v0, v1, v2], "custom_mat");
+
+        sm.SelectSingleFace(topSubFace.Id);
+        Assert.True(sm.SelectLinked(scene));
+        Assert.Equal(24, sm.SelectedFaceIds.Count);
+        Assert.DoesNotContain(disconnectedFaceId, sm.SelectedFaceIds);
+
+        // SelectFacesByMaterial
+        sm.SelectSingleFace(disconnectedFaceId);
+        Assert.True(sm.SelectFacesByMaterial(scene));
+        Assert.Single(sm.SelectedFaceIds);
+        Assert.Contains(disconnectedFaceId, sm.SelectedFaceIds);
+    }
 }
