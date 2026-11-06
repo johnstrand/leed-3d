@@ -1,5 +1,7 @@
 using System.Numerics;
 using Leed3D.Kernel.Math;
+using Leed3D.Kernel.Scene;
+using Leed3D.Kernel.Selection;
 
 namespace Leed3D.Kernel.Viewport;
 
@@ -310,6 +312,51 @@ public sealed class EditorCamera
         {
             float orthoBackoff = System.Math.Max(200.0f, OrthoSize * 2.0f);
             Position = Target - (GetForward() * orthoBackoff);
+        }
+    }
+
+    /// <summary>
+    /// Frames the camera onto a world-space <see cref="BoundingBox3D"/>.
+    /// </summary>
+    public void FrameBounds(BoundingBox3D worldBounds, float minRadius = 1.5f)
+    {
+        float radius = System.Math.Max(minRadius, worldBounds.Extents.Length());
+        FrameTarget(worldBounds.Center, radius);
+    }
+
+    /// <summary>
+    /// Frames the active selection bounds if anything is selected, falling back to framing all visible scene objects or the world origin.
+    /// Returns true if an active selection was framed, or false if the scene/origin fallback was framed.
+    /// </summary>
+    public bool FrameSelectionOrScene(EditorScene scene, SelectionManager selection)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        ArgumentNullException.ThrowIfNull(selection);
+
+        if (selection.TryGetSelectionBoundsWorld(scene, out BoundingBox3D selBounds))
+        {
+            FrameBounds(selBounds);
+            return true;
+        }
+
+        FrameScene(scene);
+        return false;
+    }
+
+    /// <summary>
+    /// Frames all visible objects and entities in <paramref name="scene"/>, or the world origin if the scene is empty.
+    /// </summary>
+    public void FrameScene(EditorScene scene)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+
+        if (SelectionManager.TryGetSceneBoundsWorld(scene, out BoundingBox3D sceneBounds))
+        {
+            FrameBounds(sceneBounds);
+        }
+        else
+        {
+            FrameTarget(Vector3.Zero, 5.0f);
         }
     }
 

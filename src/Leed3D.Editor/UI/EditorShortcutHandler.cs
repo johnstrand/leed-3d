@@ -367,16 +367,20 @@ public sealed class EditorShortcutHandler
                 return;
             }
 
-            // F: Fill Face
+            // F: Fill Face (when 3+ vertices or 2+ edges selected in Vertex/Edge mode), otherwise Frame Selection
             if (!ctrl && !alt && !shift && Raylib.IsKeyPressed(KeyboardKey.F))
             {
-                if (_app.EditController.ExecuteFillFace(_app.Scene, _app.Selection, _app.UndoStack))
+                bool canTryFill =
+                    (_app.Selection.Mode == InteractionMode.Vertex && _app.Selection.SelectedVertexIds.Count >= 3) ||
+                    (_app.Selection.Mode == InteractionMode.Edge && _app.Selection.SelectedEdges.Count >= 2);
+
+                if (canTryFill && _app.EditController.ExecuteFillFace(_app.Scene, _app.Selection, _app.UndoStack))
                 {
                     _app.StatusMessage = "Created new polygon face.";
                 }
                 else
                 {
-                    _app.StatusMessage = "Fill Face requires 3+ coplanar vertices or boundary edges.";
+                    _app.FrameSelection();
                 }
                 return;
             }

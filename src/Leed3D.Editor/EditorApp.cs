@@ -672,9 +672,18 @@ public sealed class EditorApp : IDisposable
             }
 
             ImGui.Separator();
-            if (ImGui.MenuItem("Frame Origin", "Home / F"))
+            if (ImGui.MenuItem("Frame Selection", "F"))
+            {
+                FrameSelection();
+            }
+            if (ImGui.MenuItem("Frame All Scene", "Home"))
+            {
+                FrameSceneAll();
+            }
+            if (ImGui.MenuItem("Frame Origin"))
             {
                 Camera.FrameTarget(Vector3.Zero, 5.0f);
+                StatusMessage = "Framed world origin (0, 0, 0).";
             }
 
             ImGui.Separator();
@@ -2123,11 +2132,33 @@ public sealed class EditorApp : IDisposable
             {
                 Camera.SetProjectionMode(ViewportProjectionMode.OrthoY, invertAxis: ctrlDown);
             }
-            else if (Raylib.IsKeyPressed(KeyboardKey.Home) || (!ctrlDown && !altDown && Raylib.IsKeyPressed(KeyboardKey.F)))
+            else if (Raylib.IsKeyPressed(KeyboardKey.Home))
             {
-                Camera.FrameTarget(Vector3.Zero, 5.0f);
+                FrameSceneAll();
+            }
+            else if (Raylib.IsKeyPressed(KeyboardKey.KpDecimal))
+            {
+                FrameSelection();
             }
         }
+    }
+
+    public void FrameSelection()
+    {
+        if (Camera.FrameSelectionOrScene(Scene, Selection))
+        {
+            StatusMessage = $"Framed selection at ({Camera.Target.X:0.#}, {Camera.Target.Y:0.#}, {Camera.Target.Z:0.#}).";
+        }
+        else
+        {
+            StatusMessage = $"Framed scene at ({Camera.Target.X:0.#}, {Camera.Target.Y:0.#}, {Camera.Target.Z:0.#}).";
+        }
+    }
+
+    public void FrameSceneAll()
+    {
+        Camera.FrameScene(Scene);
+        StatusMessage = $"Framed entire scene at ({Camera.Target.X:0.#}, {Camera.Target.Y:0.#}, {Camera.Target.Z:0.#}).";
     }
 
     /// <summary>

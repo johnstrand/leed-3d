@@ -437,4 +437,39 @@ public sealed class SelectionAndPickingTests
         Assert.NotNull(edgePivot);
         Assert.True(Vector3.Distance(new Vector3(10f, 20f, 30f), edgePivot.Value) < 1e-4f);
     }
+
+    [Fact]
+    public void EditorCamera_FrameSelectionOrScene_FramesSelectedElementsAndFallsBackToScene()
+    {
+        var scene = new EditorScene();
+        var objA = new SceneObject(1, "CubeA", PrimitiveGenerator.CreateBox(new Vector3(4f, 4f, 4f)))
+        {
+            Transform = new Transform3D { Position = new Vector3(20f, 5f, -15f) }
+        };
+        var objB = new SceneObject(2, "CubeB", PrimitiveGenerator.CreateBox(new Vector3(2f, 2f, 2f)))
+        {
+            Transform = new Transform3D { Position = new Vector3(-20f, 5f, -15f) }
+        };
+        scene.AddObject(objA);
+        scene.AddObject(objB);
+
+        var sm = new SelectionManager();
+        var camera = new EditorCamera();
+
+        // 1. With no selection, FrameSelectionOrScene frames all visible objects (center X = 0, Y = 5, Z = -15)
+        Assert.False(camera.FrameSelectionOrScene(scene, sm));
+        Assert.True(Vector3.Distance(new Vector3(0f, 5f, -15f), camera.Target) < 1f);
+
+        // 2. Select objA -> frames objA at (20, 5, -15)
+        sm.SelectSingleObject(1);
+        Assert.True(camera.FrameSelectionOrScene(scene, sm));
+        Assert.True(Vector3.Distance(new Vector3(20f, 5f, -15f), camera.Target) < 1e-4f);
+
+        // 3. Edit mode (Face mode): select top face (+Y at local Y = +2 -> world Y = 7)
+        sm.SetMode(InteractionMode.Face, scene);
+        PolygonFace topFace = objA.Mesh!.Faces.First(f => f.ComputeNormal(objA.Mesh).Y > 0.9f);
+        sm.SelectSingleFace(topFace.Id);
+        Assert.True(camera.FrameSelectionOrScene(scene, sm));
+        Assert.True(Vector3.Distance(new Vector3(20f, 7f, -15f), camera.Target) < 1e-4f);
+    }
 }

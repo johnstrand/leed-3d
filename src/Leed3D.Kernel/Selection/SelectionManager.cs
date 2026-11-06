@@ -1,6 +1,7 @@
 using System.Numerics;
 using Leed3D.Kernel.Entities;
 using Leed3D.Kernel.Geometry;
+using Leed3D.Kernel.Math;
 using Leed3D.Kernel.Scene;
 
 namespace Leed3D.Kernel.Selection;
@@ -547,6 +548,190 @@ public sealed class SelectionManager
             default:
                 return null;
         }
+    }
+
+    /// <summary>
+    /// Computes the world-space axis-aligned bounding box of the current selection across Object, Vertex, Edge, or Face mode.
+    /// Returns false if nothing valid is selected.
+    /// </summary>
+    public bool TryGetSelectionBoundsWorld(EditorScene scene, out BoundingBox3D bounds)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        bounds = default;
+
+        Vector3 min = new(float.PositiveInfinity);
+        Vector3 max = new(float.NegativeInfinity);
+        bool hasAny = false;
+
+        void EncapsulatePoint(Vector3 pt)
+        {
+            min = Vector3.Min(min, pt);
+            max = Vector3.Max(max, pt);
+            hasAny = true;
+        }
+
+        void EncapsulateBox(BoundingBox3D box)
+        {
+            min = Vector3.Min(min, box.Min);
+            max = Vector3.Max(max, box.Max);
+            hasAny = true;
+        }
+
+        if (Mode == InteractionMode.Object)
+        {
+            foreach (int id in _selectedObjectIds)
+            {
+                SceneObject? obj = scene.GetObject(id);
+                if (obj is not null)
+                {
+                    if (obj.Mesh is not null && obj.Mesh.VertexCount > 0)
+                    {
+                        EncapsulateBox(obj.GetWorldBounds());
+                    }
+                    else
+                    {
+                        Vector3 p = obj.Transform.Position;
+                        EncapsulateBox(new BoundingBox3D(p - new Vector3(0.5f), p + new Vector3(0.5f)));
+                    }
+                }
+            }
+
+            foreach (string id in _selectedEntityIds)
+            {
+                LevelEntity? ent = scene.GetEntity(id);
+                if (ent is not null)
+                {
+                    Vector3 p = ent.Transform.Position;
+                    EncapsulateBox(new BoundingBox3D(p - new Vector3(0.5f), p + new Vector3(0.5f)));
+                }
+            }
+
+            if (hasAny)
+            {
+                bounds = new BoundingBox3D(min, max);
+            }
+            return hasAny;
+        }
+
+        if (!ActiveObjectId.HasValue)
+        {
+            return false;
+        }
+
+        SceneObject? activeObj = scene.GetObject(ActiveObjectId.Value);
+        if (activeObj?.Mesh is null)
+        {
+            return false;
+        }
+
+        EditableMesh mesh = activeObj.Mesh;
+        Matrix4x4 localToWorld = activeObj.Transform.GetLocalMatrix();
+
+        switch (Mode)
+        {
+            case InteractionMode.Vertex:
+                foreach (int vId in _selectedVertexIds)
+                {
+                    MeshVertex? v = mesh.GetVertex(vId);
+                    if (v is not null)
+                    {
+                        EncapsulatePoint(Vector3.Transform(v.Position, localToWorld));
+                    }
+                }
+                break;
+
+            case InteractionMode.Edge:
+                foreach (EdgeKey edge in _selectedEdges)
+                {
+                    MeshVertex? vA = mesh.GetVertex(edge.VMin);
+                    MeshVertex? vB = mesh.GetVertex(edge.VMax);
+                    if (vA is not null) EncapsulatePoint(Vector3.Transform(vA.Position, localToWorld));
+                    if (vB is not null) EncapsulatePoint(Vector3.Transform(vB.Position, localToWorld));
+                }
+                break;
+
+            case InteractionMode.Face:
+                foreach (int fId in _selectedFaceIds)
+                {
+                    PolygonFace? face = mesh.GetFace(fId);
+                    if (face is not null)
+                    {
+                        for (int i = 0; i < face.VertexIds.Count; i++)
+                        {
+                            MeshVertex? v = mesh.GetVertex(face.VertexIds[i]);
+                            if (v is not null)
+                            {
+                                EncapsulatePoint(Vector3.Transform(v.Position, localToWorld));
+                            }
+                        }
+                    }
+                }
+                break;
+        }
+
+        if (hasAny)
+        {
+            bounds = new BoundingBox3D(min, max);
+        }
+        return hasAny;
+    }
+
+    /// <summary>
+    /// Computes the combined world-space bounding box of all visible objects and entities in <paramref name="scene"/>.
+    /// Returns false if the scene has no visible objects or entities.
+    /// </summary>
+    public static bool TryGetSceneBoundsWorld(EditorScene scene, out BoundingBox3D bounds)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        bounds = default;
+
+        Vector3 min = new(float.PositiveInfinity);
+        Vector3 max = new(float.NegativeInfinity);
+        bool hasAny = false;
+
+        for (int i = 0; i < scene.Objects.Count; i++)
+        {
+            SceneObject obj = scene.Objects[i];
+            if (!obj.Visible)
+            {
+                continue;
+            }
+
+            if (obj.Mesh is not null && obj.Mesh.VertexCount > 0)
+            {
+                BoundingBox3D wb = obj.GetWorldBounds();
+                min = Vector3.Min(min, wb.Min);
+                max = Vector3.Max(max, wb.Max);
+                hasAny = true;
+            }
+            else
+            {
+                Vector3 p = obj.Transform.Position;
+                min = Vector3.Min(min, p - new Vector3(0.5f));
+                max = Vector3.Max(max, p + new Vector3(0.5f));
+                hasAny = true;
+            }
+        }
+
+        for (int i = 0; i < scene.Entities.Count; i++)
+        {
+            LevelEntity ent = scene.Entities[i];
+            if (!ent.Visible)
+            {
+                continue;
+            }
+
+            Vector3 p = ent.Transform.Position;
+            min = Vector3.Min(min, p - new Vector3(0.5f));
+            max = Vector3.Max(max, p + new Vector3(0.5f));
+            hasAny = true;
+        }
+
+        if (hasAny)
+        {
+            bounds = new BoundingBox3D(min, max);
+        }
+        return hasAny;
     }
 
     private void ConvertSubElementSelection(EditableMesh mesh, InteractionMode oldMode, InteractionMode newMode)
