@@ -63,6 +63,7 @@ public sealed class PolygonFace
     private int _cachedVertexCount = -1;
     private Vector3? _cachedLocalNormal;
     private Vector3? _cachedLocalCentroid;
+    private BoundingBox3D? _cachedLocalBounds;
     private IReadOnlyList<FaceTriangle>? _cachedTrianglesWithIndices;
     private IReadOnlyList<(int V0, int V1, int V2)>? _cachedTriangles;
 
@@ -107,6 +108,7 @@ public sealed class PolygonFace
         _cachedVertexCount = -1;
         _cachedLocalNormal = null;
         _cachedLocalCentroid = null;
+        _cachedLocalBounds = null;
         _cachedTrianglesWithIndices = null;
         _cachedTriangles = null;
     }
@@ -122,6 +124,7 @@ public sealed class PolygonFace
             _cachedVertexCount = VertexIds.Count;
             _cachedLocalNormal = null;
             _cachedLocalCentroid = null;
+            _cachedLocalBounds = null;
             _cachedTrianglesWithIndices = null;
             _cachedTriangles = null;
         }
@@ -219,6 +222,46 @@ public sealed class PolygonFace
         }
 
         return validCount > 0 ? sum / validCount : Vector3.Zero;
+    }
+
+    /// <summary>
+    /// Computes or returns the cached local-space axis-aligned bounding box of this face's vertices.
+    /// </summary>
+    public BoundingBox3D GetLocalBounds(EditableMesh mesh)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+        EnsureGeometryCacheValid(mesh);
+        if (_cachedLocalBounds.HasValue)
+        {
+            return _cachedLocalBounds.Value;
+        }
+
+        int count = VertexIds.Count;
+        if (count == 0)
+        {
+            var empty = new BoundingBox3D(Vector3.Zero, Vector3.Zero);
+            _cachedLocalBounds = empty;
+            return empty;
+        }
+
+        Vector3 min = new(float.PositiveInfinity);
+        Vector3 max = new(float.NegativeInfinity);
+        bool hasAny = false;
+
+        for (int i = 0; i < count; i++)
+        {
+            MeshVertex? vert = mesh.GetVertex(VertexIds[i]);
+            if (vert is not null)
+            {
+                min = Vector3.Min(min, vert.Position);
+                max = Vector3.Max(max, vert.Position);
+                hasAny = true;
+            }
+        }
+
+        var bounds = hasAny ? new BoundingBox3D(min, max) : new BoundingBox3D(Vector3.Zero, Vector3.Zero);
+        _cachedLocalBounds = bounds;
+        return bounds;
     }
 
     /// <summary>

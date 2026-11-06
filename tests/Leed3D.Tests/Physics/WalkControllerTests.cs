@@ -215,4 +215,36 @@ public class WalkControllerTests
             $"Expected player teleported near (10, 0, 10), got {controller.Position}");
         Assert.Equal(90f, controller.YawDegrees, 2);
     }
+
+    [Fact]
+    public void CollisionMeshWorld_SpatialGridQuery_ReturnsOnlyOverlappingTrianglesWithoutDuplicates()
+    {
+        var scene = new EditorScene("SpatialGridScene");
+        // Spawn a grid of 25 boxes spread far apart across XZ
+        for (int gx = -2; gx <= 2; gx++)
+        {
+            for (int gz = -2; gz <= 2; gz++)
+            {
+                scene.AddMeshObject(
+                    $"Block_{gx}_{gz}",
+                    PrimitiveGenerator.CreateBox(new Vector3(2.0f, 2.0f, 2.0f)),
+                    new Vector3(gx * 20.0f, 1.0f, gz * 20.0f));
+            }
+        }
+
+        var world = CollisionMeshWorld.Build(scene);
+        Assert.Equal(25 * 12, world.Triangles.Count);
+        Assert.True(world.SpatialGridCellCount > 0);
+
+        var results = new List<CollisionTriangle>();
+        var queryBox = new Leed3D.Kernel.Math.BoundingBox3D(
+            new Vector3(-1.5f, 0.0f, -1.5f),
+            new Vector3(1.5f, 2.5f, 1.5f));
+
+        world.QueryTrianglesAabb(queryBox, results);
+
+        // Only the 12 triangles of the center block at (0, 1, 0) should be returned
+        Assert.Equal(12, results.Count);
+        Assert.Equal(12, results.Distinct().Count());
+    }
 }

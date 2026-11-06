@@ -158,9 +158,16 @@ public static class MeshPicker
         float minWorldDist = float.PositiveInfinity;
 
         EditableMesh mesh = obj.Mesh;
+        bool useFaceAabbBroadphase = mesh.Faces.Count > 6;
+
         for (int i = 0; i < mesh.Faces.Count; i++)
         {
             PolygonFace face = mesh.Faces[i];
+            if (useFaceAabbBroadphase && !localRay.IntersectBoundingBox(face.GetLocalBounds(mesh), out _, out _))
+            {
+                continue;
+            }
+
             IReadOnlyList<(int V0, int V1, int V2)> triangles = PolygonTriangulator.TriangulateFace(face, mesh);
 
             for (int t = 0; t < triangles.Count; t++)

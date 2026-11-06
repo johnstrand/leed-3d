@@ -22,6 +22,8 @@ public sealed class WalkController
     private readonly List<string> _activeTriggerIds = [];
     private readonly HashSet<string> _cooldownPortalIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _consumedOneShotTriggers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<CollisionTriangle> _queryCandidates = new(64);
+    private readonly HashSet<int> _queryVisitedIndices = new(64);
 
     public WalkPlayerConfig Config { get; }
     public CollisionMeshWorld World { get; set; }
@@ -390,17 +392,25 @@ public sealed class WalkController
         Span<Vector3> clipped3D = stackalloc Vector3[8];
         Span<Vector2> clipped2D = stackalloc Vector2[8];
 
-        for (int i = 0; i < World.Triangles.Count; i++)
+        World.QueryTrianglesBox(
+            cx - radius,
+            cx + radius,
+            feetY,
+            maxStepTopY + 0.005f,
+            cz - radius,
+            cz + radius,
+            _queryCandidates,
+            _queryVisitedIndices);
+
+        for (int i = 0; i < _queryCandidates.Count; i++)
         {
-            CollisionTriangle tri = World.Triangles[i];
+            CollisionTriangle tri = _queryCandidates[i];
             if (tri.Normal.Y >= minWalkableNormalY || tri.Metadata.IsCollisionDisabled())
             {
                 continue;
             }
 
-            if (tri.Bounds.Max.Y <= feetY + 0.005f || tri.Bounds.Max.Y > maxStepTopY + 0.005f ||
-                tri.Bounds.Max.X < cx - radius || tri.Bounds.Min.X > cx + radius ||
-                tri.Bounds.Max.Z < cz - radius || tri.Bounds.Min.Z > cz + radius)
+            if (tri.Bounds.Max.Y <= feetY + 0.005f || tri.Bounds.Max.Y > maxStepTopY + 0.005f)
             {
                 continue;
             }
@@ -472,9 +482,19 @@ public sealed class WalkController
             {
                 bool hitThisIter = false;
 
-                for (int tIdx = 0; tIdx < World.Triangles.Count; tIdx++)
+                World.QueryTrianglesBox(
+                    candidateXZ.X - radius,
+                    candidateXZ.X + radius,
+                    yMin,
+                    yMax,
+                    candidateXZ.Y - radius,
+                    candidateXZ.Y + radius,
+                    _queryCandidates,
+                    _queryVisitedIndices);
+
+                for (int tIdx = 0; tIdx < _queryCandidates.Count; tIdx++)
                 {
-                    CollisionTriangle tri = World.Triangles[tIdx];
+                    CollisionTriangle tri = _queryCandidates[tIdx];
                     if (tri.Normal.Y >= minWalkableNormalY || tri.Metadata.IsCollisionDisabled())
                     {
                         continue;
@@ -588,17 +608,25 @@ public sealed class WalkController
         Span<Vector3> clipped3D = stackalloc Vector3[8];
         Span<Vector2> clipped2D = stackalloc Vector2[8];
 
-        for (int i = 0; i < World.Triangles.Count; i++)
+        World.QueryTrianglesBox(
+            centerXZ.X - radius,
+            centerXZ.X + radius,
+            yMin,
+            yMax,
+            centerXZ.Y - radius,
+            centerXZ.Y + radius,
+            _queryCandidates,
+            _queryVisitedIndices);
+
+        for (int i = 0; i < _queryCandidates.Count; i++)
         {
-            CollisionTriangle tri = World.Triangles[i];
+            CollisionTriangle tri = _queryCandidates[i];
             if (tri.Normal.Y >= minWalkableNormalY || tri.Metadata.IsCollisionDisabled())
             {
                 continue;
             }
 
-            if (tri.Bounds.Max.Y <= yMin || tri.Bounds.Min.Y >= yMax ||
-                tri.Bounds.Max.X < centerXZ.X - radius || tri.Bounds.Min.X > centerXZ.X + radius ||
-                tri.Bounds.Max.Z < centerXZ.Y - radius || tri.Bounds.Min.Z > centerXZ.Y + radius)
+            if (tri.Bounds.Max.Y <= yMin || tri.Bounds.Min.Y >= yMax)
             {
                 continue;
             }
@@ -664,17 +692,25 @@ public sealed class WalkController
 
         Span<Vector2> tri2D = stackalloc Vector2[3];
 
-        for (int i = 0; i < World.Triangles.Count; i++)
+        World.QueryTrianglesBox(
+            cx - supportRadius,
+            cx + supportRadius,
+            minY,
+            maxY,
+            cz - supportRadius,
+            cz + supportRadius,
+            _queryCandidates,
+            _queryVisitedIndices);
+
+        for (int i = 0; i < _queryCandidates.Count; i++)
         {
-            CollisionTriangle tri = World.Triangles[i];
+            CollisionTriangle tri = _queryCandidates[i];
             if (tri.Normal.Y < minWalkableNormalY || tri.Metadata.IsCollisionDisabled())
             {
                 continue;
             }
 
-            if (tri.Bounds.Max.Y < minY || tri.Bounds.Min.Y > maxY ||
-                tri.Bounds.Max.X < cx - supportRadius || tri.Bounds.Min.X > cx + supportRadius ||
-                tri.Bounds.Max.Z < cz - supportRadius || tri.Bounds.Min.Z > cz + supportRadius)
+            if (tri.Bounds.Max.Y < minY || tri.Bounds.Min.Y > maxY)
             {
                 continue;
             }
@@ -719,17 +755,25 @@ public sealed class WalkController
 
         Span<Vector2> tri2D = stackalloc Vector2[3];
 
-        for (int i = 0; i < World.Triangles.Count; i++)
+        World.QueryTrianglesBox(
+            cx - supportRadius,
+            cx + supportRadius,
+            minY - 0.02f,
+            maxY + 0.02f,
+            cz - supportRadius,
+            cz + supportRadius,
+            _queryCandidates,
+            _queryVisitedIndices);
+
+        for (int i = 0; i < _queryCandidates.Count; i++)
         {
-            CollisionTriangle tri = World.Triangles[i];
+            CollisionTriangle tri = _queryCandidates[i];
             if (tri.Normal.Y > -0.35f || tri.Metadata.IsCollisionDisabled())
             {
                 continue;
             }
 
-            if (tri.Bounds.Max.Y < minY || tri.Bounds.Min.Y > maxY ||
-                tri.Bounds.Max.X < cx - supportRadius || tri.Bounds.Min.X > cx + supportRadius ||
-                tri.Bounds.Max.Z < cz - supportRadius || tri.Bounds.Min.Z > cz + supportRadius)
+            if (tri.Bounds.Max.Y < minY || tri.Bounds.Min.Y > maxY)
             {
                 continue;
             }

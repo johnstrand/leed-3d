@@ -56,20 +56,166 @@ public sealed class TeleportDestination
 /// </summary>
 public sealed class CollisionMeshWorld
 {
+    public const float GridCellSize = 4.0f;
+    private const float InvGridCellSize = 1.0f / GridCellSize;
+    private const int LargeTriangleCellSpanLimit = 64;
+
     private readonly List<CollisionTriangle> _triangles = [];
     private readonly List<CollisionTriggerVolume> _triggers = [];
     private readonly Dictionary<string, TeleportDestination> _destinations = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<(int CellX, int CellZ), List<int>> _spatialGrid = new();
+    private readonly List<int> _largeTriangleIndices = [];
 
     public IReadOnlyList<CollisionTriangle> Triangles => _triangles;
     public IReadOnlyList<CollisionTriggerVolume> Triggers => _triggers;
     public IReadOnlyDictionary<string, TeleportDestination> Destinations => _destinations;
+    public int SpatialGridCellCount => _spatialGrid.Count;
 
     public void AddTriangle(CollisionTriangle triangle)
     {
         ArgumentNullException.ThrowIfNull(triangle);
         if (!triangle.Metadata.IsCollisionDisabled())
         {
+            int index = _triangles.Count;
             _triangles.Add(triangle);
+            IndexTriangle(index, triangle.Bounds);
+        }
+    }
+
+    private void IndexTriangle(int index, BoundingBox3D bounds)
+    {
+        int minCellX = (int)MathF.Floor(bounds.Min.X * InvGridCellSize);
+        int maxCellX = (int)MathF.Floor(bounds.Max.X * InvGridCellSize);
+        int minCellZ = (int)MathF.Floor(bounds.Min.Z * InvGridCellSize);
+        int maxCellZ = (int)MathF.Floor(bounds.Max.Z * InvGridCellSize);
+
+        long spanX = (long)maxCellX - minCellX + 1;
+        long spanZ = (long)maxCellZ - minCellZ + 1;
+
+        if (spanX * spanZ > LargeTriangleCellSpanLimit)
+        {
+            _largeTriangleIndices.Add(index);
+            return;
+        }
+
+        for (int cz = minCellZ; cz <= maxCellZ; cz++)
+        {
+            for (int cx = minCellX; cx <= maxCellX; cx++)
+            {
+                var key = (cx, cz);
+                if (!_spatialGrid.TryGetValue(key, out List<int>? cellList))
+                {
+                    cellList = new List<int>(8);
+                    _spatialGrid[key] = cellList;
+                }
+                cellList.Add(index);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Queries all collision triangles whose world-space AABB overlaps <paramref name="queryBounds"/>
+    /// using the 2D XZ uniform spatial hash grid and 3D AABB filtering.
+    /// </summary>
+    public void QueryTrianglesAabb(BoundingBox3D queryBounds, List<CollisionTriangle> results, HashSet<int>? visitedScratch = null)
+    {
+        QueryTrianglesBox(
+            queryBounds.Min.X,
+            queryBounds.Max.X,
+            queryBounds.Min.Y,
+            queryBounds.Max.Y,
+            queryBounds.Min.Z,
+            queryBounds.Max.Z,
+            results,
+            visitedScratch);
+    }
+
+    /// <summary>
+    /// Queries all collision triangles whose world-space AABB overlaps the given box bounds
+    /// using the 2D XZ uniform spatial hash grid and 3D AABB filtering.
+    /// </summary>
+    public void QueryTrianglesBox(
+        float minX,
+        float maxX,
+        float minY,
+        float maxY,
+        float minZ,
+        float maxZ,
+        List<CollisionTriangle> results,
+        HashSet<int>? visitedScratch = null)
+    {
+        ArgumentNullException.ThrowIfNull(results);
+        results.Clear();
+
+        if (_triangles.Count == 0)
+        {
+            return;
+        }
+
+        int minCellX = (int)MathF.Floor(minX * InvGridCellSize);
+        int maxCellX = (int)MathF.Floor(maxX * InvGridCellSize);
+        int minCellZ = (int)MathF.Floor(minZ * InvGridCellSize);
+        int maxCellZ = (int)MathF.Floor(maxZ * InvGridCellSize);
+
+        for (int i = 0; i < _largeTriangleIndices.Count; i++)
+        {
+            CollisionTriangle tri = _triangles[_largeTriangleIndices[i]];
+            if (tri.Bounds.Max.X >= minX && tri.Bounds.Min.X <= maxX &&
+                tri.Bounds.Max.Y >= minY && tri.Bounds.Min.Y <= maxY &&
+                tri.Bounds.Max.Z >= minZ && tri.Bounds.Min.Z <= maxZ)
+            {
+                results.Add(tri);
+            }
+        }
+
+        bool singleCell = minCellX == maxCellX && minCellZ == maxCellZ;
+        if (singleCell)
+        {
+            if (_spatialGrid.TryGetValue((minCellX, minCellZ), out List<int>? cellList))
+            {
+                for (int i = 0; i < cellList.Count; i++)
+                {
+                    CollisionTriangle tri = _triangles[cellList[i]];
+                    if (tri.Bounds.Max.X >= minX && tri.Bounds.Min.X <= maxX &&
+                        tri.Bounds.Max.Y >= minY && tri.Bounds.Min.Y <= maxY &&
+                        tri.Bounds.Max.Z >= minZ && tri.Bounds.Min.Z <= maxZ)
+                    {
+                        results.Add(tri);
+                    }
+                }
+            }
+            return;
+        }
+
+        HashSet<int> visited = visitedScratch ?? [];
+        visited.Clear();
+
+        for (int cz = minCellZ; cz <= maxCellZ; cz++)
+        {
+            for (int cx = minCellX; cx <= maxCellX; cx++)
+            {
+                if (!_spatialGrid.TryGetValue((cx, cz), out List<int>? cellList))
+                {
+                    continue;
+                }
+
+                for (int i = 0; i < cellList.Count; i++)
+                {
+                    int idx = cellList[i];
+                    if (!visited.Add(idx))
+                    {
+                        continue;
+                    }
+
+                    CollisionTriangle tri = _triangles[idx];
+                    if (tri.Bounds.Max.X >= minX && tri.Bounds.Min.X <= maxX &&
+                        tri.Bounds.Max.Y >= minY && tri.Bounds.Min.Y <= maxY &&
+                        tri.Bounds.Max.Z >= minZ && tri.Bounds.Min.Z <= maxZ)
+                    {
+                        results.Add(tri);
+                    }
+                }
+            }
         }
     }
 
@@ -192,7 +338,7 @@ public sealed class CollisionMeshWorld
 
                     BoundingBox3D bounds = BoundingBox3D.FromPoints([p0, p1, p2]);
 
-                    world._triangles.Add(new CollisionTriangle
+                    world.AddTriangle(new CollisionTriangle
                     {
                         V0 = p0,
                         V1 = p1,
@@ -277,7 +423,7 @@ public sealed class CollisionMeshWorld
             Vector3 normal = tri.Normal;
             BoundingBox3D bounds = BoundingBox3D.FromPoints([v0, v1, v2]);
 
-            world._triangles.Add(new CollisionTriangle
+            world.AddTriangle(new CollisionTriangle
             {
                 V0 = v0,
                 V1 = v1,
