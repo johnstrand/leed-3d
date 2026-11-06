@@ -1518,6 +1518,366 @@ public static class MeshTopologyOps
     }
 
     /// <summary>
+    /// Removes the specified vertices and all faces referencing them from <paramref name="mesh"/>,
+    /// and runs <see cref="EditableMesh.ValidateAndRepair"/> to prune any resulting orphaned vertices.
+    /// </summary>
+    public static bool DeleteVertices(EditableMesh mesh, IReadOnlyCollection<int> vertexIds)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+        ArgumentNullException.ThrowIfNull(vertexIds);
+
+        if (vertexIds.Count == 0)
+        {
+            return false;
+        }
+
+        var targetSet = new HashSet<int>(vertexIds);
+        var facesToRemove = new List<int>();
+
+        foreach (PolygonFace face in mesh.Faces)
+        {
+            for (int i = 0; i < face.VertexIds.Count; i++)
+            {
+                if (targetSet.Contains(face.VertexIds[i]))
+                {
+                    facesToRemove.Add(face.Id);
+                    break;
+                }
+            }
+        }
+
+        bool changed = false;
+        for (int i = 0; i < facesToRemove.Count; i++)
+        {
+            if (mesh.RemoveFace(facesToRemove[i]))
+            {
+                changed = true;
+            }
+        }
+
+        foreach (int vId in targetSet)
+        {
+            if (mesh.RemoveVertex(vId))
+            {
+                changed = true;
+            }
+        }
+
+        if (changed)
+        {
+            mesh.ValidateAndRepair();
+        }
+
+        return changed;
+    }
+
+    /// <summary>
+    /// Dissolves the specified vertices without creating holes where possible:
+    /// - For valence-2 or boundary vertices on faces with 4+ vertices, removes the vertex from each incident face loop.
+    /// - For interior vertices shared by 3+ faces, merges the incident faces into a single N-gon face along their outer boundary.
+    /// </summary>
+    public static bool DissolveVertices(EditableMesh mesh, IReadOnlyCollection<int> vertexIds)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+        ArgumentNullException.ThrowIfNull(vertexIds);
+
+        if (vertexIds.Count == 0)
+        {
+            return false;
+        }
+
+        bool dissolvedAny = false;
+        var sortedIds = vertexIds.Distinct().OrderBy(id => id).ToList();
+
+        foreach (int vId in sortedIds)
+        {
+            if (mesh.GetVertex(vId) is null)
+            {
+                continue;
+            }
+
+            TopologyGraph topology = mesh.GetTopology();
+            IReadOnlyList<int> incidentFaceIds = topology.GetVertexIncidentFaces(vId);
+
+            if (incidentFaceIds.Count == 0)
+            {
+                if (mesh.RemoveVertex(vId))
+                {
+                    dissolvedAny = true;
+                }
+                continue;
+            }
+
+            if (incidentFaceIds.Count <= 2)
+            {
+                bool allCanShrink = true;
+                for (int i = 0; i < incidentFaceIds.Count; i++)
+                {
+                    PolygonFace? f = mesh.GetFace(incidentFaceIds[i]);
+                    if (f is null || f.VertexIds.Count < 4)
+                    {
+                        allCanShrink = false;
+                        break;
+                    }
+                }
+
+                if (allCanShrink)
+                {
+                    for (int i = 0; i < incidentFaceIds.Count; i++)
+                    {
+                        PolygonFace? f = mesh.GetFace(incidentFaceIds[i]);
+                        f?.VertexIds.Remove(vId);
+                    }
+                    mesh.RemoveVertex(vId);
+                    mesh.ValidateAndRepair();
+                    dissolvedAny = true;
+                }
+                else if (incidentFaceIds.Count == 2)
+                {
+                    int? mergedId = DissolveFaces(mesh, incidentFaceIds);
+                    if (mergedId.HasValue)
+                    {
+                        PolygonFace? mergedFace = mesh.GetFace(mergedId.Value);
+                        if (mergedFace is not null && mergedFace.VertexIds.Count >= 4 && mergedFace.VertexIds.Remove(vId))
+                        {
+                            mesh.ValidateAndRepair();
+                        }
+                        dissolvedAny = true;
+                    }
+                }
+            }
+            else
+            {
+                int? mergedId = DissolveFaces(mesh, incidentFaceIds);
+                if (mergedId.HasValue)
+                {
+                    PolygonFace? mergedFace = mesh.GetFace(mergedId.Value);
+                    if (mergedFace is not null && mergedFace.VertexIds.Count >= 4 && mergedFace.VertexIds.Remove(vId))
+                    {
+                        mesh.ValidateAndRepair();
+                    }
+                    dissolvedAny = true;
+                }
+            }
+        }
+
+        return dissolvedAny;
+    }
+
+    /// <summary>
+    /// Removes all faces incident to the specified edges from <paramref name="mesh"/>
+    /// and runs <see cref="EditableMesh.ValidateAndRepair"/> to prune any resulting orphaned vertices.
+    /// </summary>
+    public static bool DeleteEdges(EditableMesh mesh, IReadOnlyCollection<EdgeKey> edges)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+        ArgumentNullException.ThrowIfNull(edges);
+
+        if (edges.Count == 0)
+        {
+            return false;
+        }
+
+        TopologyGraph topology = mesh.GetTopology();
+        var facesToRemove = new HashSet<int>();
+
+        foreach (EdgeKey edgeKey in edges)
+        {
+            mesh.EdgeMetadata.Remove(edgeKey);
+            TopologyEdge? topoEdge = topology.GetEdge(edgeKey);
+            if (topoEdge is not null)
+            {
+                for (int i = 0; i < topoEdge.IncidentFaceIds.Count; i++)
+                {
+                    facesToRemove.Add(topoEdge.IncidentFaceIds[i]);
+                }
+            }
+        }
+
+        if (facesToRemove.Count == 0)
+        {
+            return false;
+        }
+
+        DeleteFaces(mesh, facesToRemove);
+        return true;
+    }
+
+    /// <summary>
+    /// Dissolves the specified interior edges by merging the faces on either side of each edge into
+    /// a single N-gon face along their outer boundary, and simplifies any remaining collinear valence-2 endpoint vertices.
+    /// Returns the IDs of the newly merged faces.
+    /// </summary>
+    public static IReadOnlyList<int> DissolveEdges(
+        EditableMesh mesh,
+        IReadOnlyCollection<EdgeKey> edges,
+        bool dissolveCollinearEndpoints = true)
+    {
+        ArgumentNullException.ThrowIfNull(mesh);
+        ArgumentNullException.ThrowIfNull(edges);
+
+        if (edges.Count == 0)
+        {
+            return [];
+        }
+
+        TopologyGraph topology = mesh.GetTopology();
+        var endpointVertexIds = new HashSet<int>();
+        var faceAdjAcrossSelectedEdges = new Dictionary<int, HashSet<int>>();
+
+        foreach (EdgeKey edgeKey in edges)
+        {
+            TopologyEdge? topoEdge = topology.GetEdge(edgeKey);
+            if (topoEdge is null || topoEdge.IncidentFaceIds.Count != 2)
+            {
+                continue;
+            }
+
+            int fA = topoEdge.IncidentFaceIds[0];
+            int fB = topoEdge.IncidentFaceIds[1];
+            endpointVertexIds.Add(edgeKey.VMin);
+            endpointVertexIds.Add(edgeKey.VMax);
+
+            if (!faceAdjAcrossSelectedEdges.TryGetValue(fA, out HashSet<int>? setA))
+            {
+                setA = [];
+                faceAdjAcrossSelectedEdges[fA] = setA;
+            }
+            setA.Add(fB);
+
+            if (!faceAdjAcrossSelectedEdges.TryGetValue(fB, out HashSet<int>? setB))
+            {
+                setB = [];
+                faceAdjAcrossSelectedEdges[fB] = setB;
+            }
+            setB.Add(fA);
+        }
+
+        if (faceAdjAcrossSelectedEdges.Count == 0)
+        {
+            return [];
+        }
+
+        // Group faces connected across the selected edges into connected components
+        var visitedFaces = new HashSet<int>();
+        var mergedFaceIds = new List<int>();
+
+        foreach (int startFaceId in faceAdjAcrossSelectedEdges.Keys)
+        {
+            if (!visitedFaces.Add(startFaceId))
+            {
+                continue;
+            }
+
+            var component = new List<int> { startFaceId };
+            var queue = new Queue<int>();
+            queue.Enqueue(startFaceId);
+
+            while (queue.Count > 0)
+            {
+                int curr = queue.Dequeue();
+                if (faceAdjAcrossSelectedEdges.TryGetValue(curr, out HashSet<int>? neighbors))
+                {
+                    foreach (int next in neighbors)
+                    {
+                        if (visitedFaces.Add(next))
+                        {
+                            component.Add(next);
+                            queue.Enqueue(next);
+                        }
+                    }
+                }
+            }
+
+            if (component.Count >= 2)
+            {
+                int? newFaceId = DissolveFaces(mesh, component);
+                if (newFaceId.HasValue)
+                {
+                    mergedFaceIds.Add(newFaceId.Value);
+                }
+            }
+        }
+
+        foreach (EdgeKey edgeKey in edges)
+        {
+            mesh.EdgeMetadata.Remove(edgeKey);
+        }
+
+        // Clean up any endpoint vertices that now have valence 2 and lie collinearly along straight edges
+        if (dissolveCollinearEndpoints && mergedFaceIds.Count > 0 && endpointVertexIds.Count > 0)
+        {
+            TopologyGraph updatedTopology = mesh.GetTopology();
+            bool removedEndpoint = false;
+
+            foreach (int vId in endpointVertexIds)
+            {
+                MeshVertex? v = mesh.GetVertex(vId);
+                if (v is null)
+                {
+                    continue;
+                }
+
+                IReadOnlyList<int> connectedVerts = updatedTopology.GetVertexConnectedVertices(vId);
+                if (connectedVerts.Count != 2)
+                {
+                    continue;
+                }
+
+                MeshVertex? vPrev = mesh.GetVertex(connectedVerts[0]);
+                MeshVertex? vNext = mesh.GetVertex(connectedVerts[1]);
+                if (vPrev is null || vNext is null)
+                {
+                    continue;
+                }
+
+                Vector3 e1 = v.Position - vPrev.Position;
+                Vector3 e2 = vNext.Position - v.Position;
+                float len1 = e1.Length();
+                float len2 = e2.Length();
+                if (len1 <= 1e-5f || len2 <= 1e-5f)
+                {
+                    continue;
+                }
+
+                if (Vector3.Dot(e1 / len1, e2 / len2) < 0.9995f)
+                {
+                    continue;
+                }
+
+                IReadOnlyList<int> incFaces = updatedTopology.GetVertexIncidentFaces(vId);
+                bool canRemoveFromAll = incFaces.Count > 0;
+                for (int i = 0; i < incFaces.Count; i++)
+                {
+                    PolygonFace? f = mesh.GetFace(incFaces[i]);
+                    if (f is null || f.VertexIds.Count < 4)
+                    {
+                        canRemoveFromAll = false;
+                        break;
+                    }
+                }
+
+                if (canRemoveFromAll)
+                {
+                    for (int i = 0; i < incFaces.Count; i++)
+                    {
+                        mesh.GetFace(incFaces[i])?.VertexIds.Remove(vId);
+                    }
+                    mesh.RemoveVertex(vId);
+                    removedEndpoint = true;
+                }
+            }
+
+            if (removedEndpoint)
+            {
+                mesh.ValidateAndRepair();
+            }
+        }
+
+        return mergedFaceIds;
+    }
+
+    /// <summary>
     /// Reverses the vertex winding order on the specified faces.
     /// </summary>
     public static void FlipSelectedFaces(EditableMesh mesh, IReadOnlyCollection<int> faceIds)

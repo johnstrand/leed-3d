@@ -687,6 +687,115 @@ public sealed class InteractiveEditController
     }
 
     /// <summary>
+    /// Deletes selected vertices and all faces referencing them.
+    /// </summary>
+    public bool ExecuteDeleteVertices(EditorScene scene, SelectionManager selection, UndoRedoStack undoStack)
+    {
+        if (!selection.ActiveObjectId.HasValue || selection.SelectedVertexIds.Count == 0)
+        {
+            return false;
+        }
+
+        SceneObject? obj = scene.GetObject(selection.ActiveObjectId.Value);
+        if (obj?.Mesh is null)
+        {
+            return false;
+        }
+
+        EditorScene before = scene.CloneSnapshot();
+        if (MeshTopologyOps.DeleteVertices(obj.Mesh, selection.SelectedVertexIds))
+        {
+            selection.ClearSelection();
+            undoStack.RecordAction("Delete Vertices", before, scene);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Dissolves selected vertices by removing valence-2/boundary vertices from face loops or merging incident faces.
+    /// </summary>
+    public bool ExecuteDissolveVertices(EditorScene scene, SelectionManager selection, UndoRedoStack undoStack)
+    {
+        if (!selection.ActiveObjectId.HasValue || selection.SelectedVertexIds.Count == 0)
+        {
+            return false;
+        }
+
+        SceneObject? obj = scene.GetObject(selection.ActiveObjectId.Value);
+        if (obj?.Mesh is null)
+        {
+            return false;
+        }
+
+        EditorScene before = scene.CloneSnapshot();
+        if (MeshTopologyOps.DissolveVertices(obj.Mesh, selection.SelectedVertexIds))
+        {
+            selection.ClearSelection();
+            undoStack.RecordAction("Dissolve Vertices", before, scene);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Deletes selected edges and all faces incident to them.
+    /// </summary>
+    public bool ExecuteDeleteEdges(EditorScene scene, SelectionManager selection, UndoRedoStack undoStack)
+    {
+        if (!selection.ActiveObjectId.HasValue || selection.SelectedEdges.Count == 0)
+        {
+            return false;
+        }
+
+        SceneObject? obj = scene.GetObject(selection.ActiveObjectId.Value);
+        if (obj?.Mesh is null)
+        {
+            return false;
+        }
+
+        EditorScene before = scene.CloneSnapshot();
+        if (MeshTopologyOps.DeleteEdges(obj.Mesh, selection.SelectedEdges))
+        {
+            selection.ClearSelection();
+            undoStack.RecordAction("Delete Edges", before, scene);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Dissolves selected edges by merging the faces across each interior edge into a single N-gon face.
+    /// </summary>
+    public bool ExecuteDissolveEdges(EditorScene scene, SelectionManager selection, UndoRedoStack undoStack)
+    {
+        if (!selection.ActiveObjectId.HasValue || selection.SelectedEdges.Count == 0)
+        {
+            return false;
+        }
+
+        SceneObject? obj = scene.GetObject(selection.ActiveObjectId.Value);
+        if (obj?.Mesh is null)
+        {
+            return false;
+        }
+
+        EditorScene before = scene.CloneSnapshot();
+        IReadOnlyList<int> mergedFaceIds = MeshTopologyOps.DissolveEdges(obj.Mesh, selection.SelectedEdges);
+        if (mergedFaceIds.Count > 0)
+        {
+            selection.ClearSelection();
+            undoStack.RecordAction("Dissolve Edges", before, scene);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Deletes selected objects and entities from the scene.
     /// </summary>
     public bool ExecuteDeleteObjects(EditorScene scene, SelectionManager selection, UndoRedoStack undoStack)

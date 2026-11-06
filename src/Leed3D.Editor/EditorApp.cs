@@ -1350,6 +1350,8 @@ public sealed class EditorApp : IDisposable
             ImGui.SameLine();
             if (ImGui.Button("Weld Distance...")) ShortcutHandler.OpenWeldPopupRequested = true;
             ImGui.SameLine();
+            if (ImGui.Button("Dissolve")) EditController.ExecuteDissolveVertices(Scene, Selection, UndoStack);
+            ImGui.SameLine();
             if (ImGui.Button("Delete (X)")) ShortcutHandler.OpenDeletePopupRequested = true;
         }
         else if (Selection.Mode == InteractionMode.Edge)
@@ -1363,6 +1365,8 @@ public sealed class EditorApp : IDisposable
             if (ImGui.Button("Subdivide...")) ShortcutHandler.OpenSubdividePopupRequested = true;
             ImGui.SameLine();
             if (ImGui.Button("Fill Face (F)")) EditController.ExecuteFillFace(Scene, Selection, UndoStack);
+            ImGui.SameLine();
+            if (ImGui.Button("Dissolve")) EditController.ExecuteDissolveEdges(Scene, Selection, UndoStack);
             ImGui.SameLine();
             if (ImGui.Button("Delete (X)")) ShortcutHandler.OpenDeletePopupRequested = true;
         }
@@ -3558,32 +3562,69 @@ public sealed class EditorApp : IDisposable
             {
                 if (ImGui.MenuItem("Delete Faces (Delete)"))
                 {
-                    EditController.ExecuteDeleteFaces(Scene, Selection, UndoStack);
+                    if (EditController.ExecuteDeleteFaces(Scene, Selection, UndoStack))
+                    {
+                        StatusMessage = "Deleted selected face(s).";
+                    }
                 }
                 if (ImGui.MenuItem("Dissolve Faces (X)"))
                 {
-                    EditController.ExecuteDissolveFaces(Scene, Selection, UndoStack);
+                    if (EditController.ExecuteDissolveFaces(Scene, Selection, UndoStack))
+                    {
+                        StatusMessage = "Dissolved selected faces into N-gon.";
+                    }
                 }
             }
             else if (Selection.Mode == InteractionMode.Vertex)
             {
-                if (ImGui.MenuItem("Delete / Weld Vertices (Delete)"))
+                if (ImGui.MenuItem("Delete Vertices (Delete)"))
                 {
-                    EditController.ExecuteWeldCenter(Scene, Selection, UndoStack);
+                    if (EditController.ExecuteDeleteVertices(Scene, Selection, UndoStack))
+                    {
+                        StatusMessage = "Deleted selected vertex/vertices.";
+                    }
+                }
+                if (ImGui.MenuItem("Dissolve Vertices (X)"))
+                {
+                    if (EditController.ExecuteDissolveVertices(Scene, Selection, UndoStack))
+                    {
+                        StatusMessage = "Dissolved selected vertex/vertices.";
+                    }
+                }
+                ImGui.Separator();
+                if (ImGui.MenuItem("Weld Vertices at Center (M)"))
+                {
+                    if (EditController.ExecuteWeldCenter(Scene, Selection, UndoStack))
+                    {
+                        StatusMessage = "Welded vertices at center.";
+                    }
                 }
             }
             else if (Selection.Mode == InteractionMode.Edge)
             {
                 if (ImGui.MenuItem("Delete Edges (Delete)"))
                 {
-                    EditController.ExecuteSubdivideEdges(Scene, Selection, 1, UndoStack);
+                    if (EditController.ExecuteDeleteEdges(Scene, Selection, UndoStack))
+                    {
+                        StatusMessage = "Deleted selected edge(s).";
+                    }
+                }
+                if (ImGui.MenuItem("Dissolve Edges (X)"))
+                {
+                    if (EditController.ExecuteDissolveEdges(Scene, Selection, UndoStack))
+                    {
+                        StatusMessage = "Dissolved selected edge(s) into N-gon.";
+                    }
                 }
             }
             else
             {
                 if (ImGui.MenuItem("Delete Objects (Delete)"))
                 {
-                    EditController.ExecuteDeleteObjects(Scene, Selection, UndoStack);
+                    if (EditController.ExecuteDeleteObjects(Scene, Selection, UndoStack))
+                    {
+                        StatusMessage = "Deleted selected object(s).";
+                    }
                 }
             }
             ImGui.EndPopup();
@@ -3657,9 +3698,13 @@ public sealed class EditorApp : IDisposable
                     ShortcutHandler.OpenWeldPopupRequested = true;
                 }
                 ImGui.Separator();
-                if (ImGui.MenuItem("Delete Vertices", "Del / X"))
+                if (ImGui.MenuItem("Dissolve Vertices", "X"))
                 {
-                    ShortcutHandler.OpenDeletePopupRequested = true;
+                    EditController.ExecuteDissolveVertices(Scene, Selection, UndoStack);
+                }
+                if (ImGui.MenuItem("Delete Vertices", "Del"))
+                {
+                    EditController.ExecuteDeleteVertices(Scene, Selection, UndoStack);
                 }
             }
             else if (Selection.Mode == InteractionMode.Edge)
@@ -3678,9 +3723,13 @@ public sealed class EditorApp : IDisposable
                     EditController.ExecuteFillFace(Scene, Selection, UndoStack);
                 }
                 ImGui.Separator();
-                if (ImGui.MenuItem("Delete Edges", "Del / X"))
+                if (ImGui.MenuItem("Dissolve Edges", "X"))
                 {
-                    ShortcutHandler.OpenDeletePopupRequested = true;
+                    EditController.ExecuteDissolveEdges(Scene, Selection, UndoStack);
+                }
+                if (ImGui.MenuItem("Delete Edges", "Del"))
+                {
+                    EditController.ExecuteDeleteEdges(Scene, Selection, UndoStack);
                 }
             }
             else if (Selection.Mode == InteractionMode.Face)

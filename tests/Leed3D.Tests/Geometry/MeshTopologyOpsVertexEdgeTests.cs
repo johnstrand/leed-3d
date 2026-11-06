@@ -2,6 +2,8 @@ using System.Numerics;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Primitives;
 using Leed3D.Kernel.Scene;
+using Leed3D.Kernel.Selection;
+using Leed3D.Kernel.Tools;
 
 namespace Leed3D.Tests.Geometry;
 
@@ -357,5 +359,75 @@ public class MeshTopologyOpsVertexEdgeTests
         Assert.NotNull(capId);
         Assert.Equal(10, openBox.FaceCount);
         Assert.True(openBox.GetTopology().IsClosedManifold());
+    }
+
+    [Fact]
+    public void DeleteVertices_And_DissolveVertices_ModifyMeshCleanlyAndSupportUndo()
+    {
+        // 1. DeleteVertices on a cube corner removes its 3 incident faces and the vertex itself
+        EditableMesh cube = PrimitiveGenerator.CreateBox(new Vector3(2, 2, 2));
+        int cornerVertId = cube.Vertices[0].Id;
+        Assert.True(MeshTopologyOps.DeleteVertices(cube, [cornerVertId]));
+        Assert.Null(cube.GetVertex(cornerVertId));
+        Assert.Equal(3, cube.FaceCount);
+        Assert.Equal(7, cube.VertexCount);
+
+        // 2. DissolveVertices on a subdivided edge midpoint restores original 8-vertex 6-face cube
+        EditableMesh cubeSub = PrimitiveGenerator.CreateBox(new Vector3(2, 2, 2));
+        EdgeKey edge0 = cubeSub.GetTopology().Edges[0].Key;
+        IReadOnlyList<int> midVerts = MeshTopologyOps.SubdivideEdges(cubeSub, [edge0], cuts: 1);
+        Assert.Single(midVerts);
+        Assert.Equal(9, cubeSub.VertexCount);
+
+        Assert.True(MeshTopologyOps.DissolveVertices(cubeSub, midVerts));
+        Assert.Equal(8, cubeSub.VertexCount);
+        Assert.Equal(6, cubeSub.FaceCount);
+        Assert.True(cubeSub.GetTopology().IsClosedManifold());
+
+        // 3. DissolveVertices on center vertex of 2x2 subdivided plane merges 4 quads into 1 outer quad
+        EditableMesh plane2x2 = PrimitiveGenerator.CreatePlane(4f, 4f, 2, 2);
+        Assert.Equal(4, plane2x2.FaceCount);
+        int centerVertId = plane2x2.Vertices.First(v => v.Position.LengthSquared() < 1e-4f).Id;
+
+        Assert.True(MeshTopologyOps.DissolveVertices(plane2x2, [centerVertId]));
+        Assert.Equal(1, plane2x2.FaceCount);
+        Assert.Null(plane2x2.GetVertex(centerVertId));
+    }
+
+    [Fact]
+    public void DeleteEdges_And_DissolveEdges_ModifyMeshCleanlyAndSupportControllerUndo()
+    {
+        // 1. DeleteEdges removes incident faces (not subdividing!)
+        var scene = new EditorScene("EdgeDeleteDissolveTest");
+        SceneObject boxObj = scene.AddMeshObject("Cube", PrimitiveGenerator.CreateBox(new Vector3(2, 2, 2)), Vector3.Zero);
+        var selection = new SelectionManager();
+        selection.SelectSingleObject(boxObj.Id);
+        selection.SetMode(InteractionMode.Edge, scene);
+
+        EdgeKey targetEdge = boxObj.Mesh!.GetTopology().Edges[0].Key;
+        selection.SelectSingleEdge(targetEdge);
+
+        var undo = new UndoRedoStack();
+        var controller = new InteractiveEditController();
+
+        Assert.True(controller.ExecuteDeleteEdges(scene, selection, undo));
+        // Deleting 1 shared edge of a cube removes its 2 incident faces -> 4 faces left
+        Assert.Equal(4, scene.GetObject(boxObj.Id)!.Mesh!.FaceCount);
+        Assert.Empty(selection.SelectedEdges);
+
+        undo.Undo(scene);
+        Assert.Equal(6, scene.GetObject(boxObj.Id)!.Mesh!.FaceCount);
+
+        // 2. DissolveEdges merges the 2 faces across an interior edge into a single N-gon face
+        EditableMesh plane2x1 = PrimitiveGenerator.CreatePlane(4f, 2f, 2, 1);
+        Assert.Equal(2, plane2x1.FaceCount);
+        Assert.Equal(6, plane2x1.VertexCount);
+
+        TopologyEdge sharedInteriorEdge = plane2x1.GetTopology().Edges.Single(e => !e.IsBoundary);
+        IReadOnlyList<int> mergedFaces = MeshTopologyOps.DissolveEdges(plane2x1, [sharedInteriorEdge.Key]);
+        Assert.Single(mergedFaces);
+        Assert.Equal(1, plane2x1.FaceCount);
+        // Collinear valence-2 endpoints on the boundary were also simplified -> clean 4-vertex quad!
+        Assert.Equal(4, plane2x1.VertexCount);
     }
 }
