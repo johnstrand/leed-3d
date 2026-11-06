@@ -214,6 +214,45 @@ public sealed class TransformGizmoTests
     }
 
     [Fact]
+    public void TransformApplicator_ObjectMode_RotatesSelectedObjectsAroundTheirGeometricAverage()
+    {
+        var scene = new EditorScene();
+        var selection = new SelectionManager();
+        var applicator = new TransformApplicator();
+        SceneObject first = scene.AddMeshObject("First", PrimitiveGenerator.CreateBox(Vector3.One), new Vector3(-2f, 0f, 0f));
+        SceneObject second = scene.AddMeshObject("Second", PrimitiveGenerator.CreateBox(Vector3.One), new Vector3(2f, 0f, 0f));
+        first.Transform.RotationEulerDegrees = new Vector3(25f, -15f, 10f);
+        second.Transform.RotationEulerDegrees = new Vector3(-10f, 35f, 5f);
+        selection.SelectSingleObject(first.Id);
+        selection.ToggleSelectObject(second.Id);
+
+        Vector3 pivot = selection.GetSelectionPivotWorld(scene)!.Value;
+        Quaternion rotationDelta = Quaternion.CreateFromAxisAngle(Vector3.UnitZ, MathF.PI / 2.0f);
+        Quaternion firstStartRotation = first.Transform.GetRotationQuaternion();
+        Quaternion secondStartRotation = second.Transform.GetRotationQuaternion();
+        Vector3 firstStartPosition = first.Transform.Position;
+        Vector3 secondStartPosition = second.Transform.Position;
+
+        applicator.BeginSession(scene, selection, pivot);
+        applicator.ApplyRotation(scene, rotationDelta, new Vector3(0.0f, 0.0f, 90.0f));
+
+        Assert.Equal(Vector3.Zero, pivot);
+        AssertVectorApproximately(
+            pivot + Vector3.Transform(firstStartPosition - pivot, rotationDelta),
+            first.Transform.Position);
+        AssertVectorApproximately(
+            pivot + Vector3.Transform(secondStartPosition - pivot, rotationDelta),
+            second.Transform.Position);
+        AssertVectorApproximately(pivot, (first.Transform.Position + second.Transform.Position) * 0.5f);
+        AssertVectorApproximately(
+            Vector3.Transform(Vector3.Transform(Vector3.UnitX, firstStartRotation), rotationDelta),
+            first.Transform.TransformDirectionToWorld(Vector3.UnitX));
+        AssertVectorApproximately(
+            Vector3.Transform(Vector3.Transform(Vector3.UnitX, secondStartRotation), rotationDelta),
+            second.Transform.TransformDirectionToWorld(Vector3.UnitX));
+    }
+
+    [Fact]
     public void TransformApplicator_EditModeFaceSelection_TransformsFaceVerticesWithoutDrift()
     {
         var scene = new EditorScene();
@@ -257,5 +296,10 @@ public sealed class TransformGizmoTests
             MeshVertex v = scene.GetObject(cube.Id)!.Mesh!.GetVertex(vId)!;
             Assert.Equal(1.0f, v.Position.Y, 3);
         }
+    }
+
+    private static void AssertVectorApproximately(Vector3 expected, Vector3 actual)
+    {
+        Assert.True(Vector3.Distance(expected, actual) < 1e-4f, $"Expected {expected}, got {actual}.");
     }
 }

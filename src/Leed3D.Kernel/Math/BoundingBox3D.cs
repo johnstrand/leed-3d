@@ -72,6 +72,16 @@ public readonly struct BoundingBox3D : IEquatable<BoundingBox3D>
     }
 
     /// <summary>
+    /// Checks whether this bounding box intersects with <paramref name="other"/>.
+    /// </summary>
+    public bool Intersects(BoundingBox3D other)
+    {
+        return Min.X <= other.Max.X && Max.X >= other.Min.X &&
+               Min.Y <= other.Max.Y && Max.Y >= other.Min.Y &&
+               Min.Z <= other.Max.Z && Max.Z >= other.Min.Z;
+    }
+
+    /// <summary>
     /// Transforms the 8 corner points of this bounding box by the specified 4x4 matrix
     /// and returns the newly fitted AABB.
     /// </summary>

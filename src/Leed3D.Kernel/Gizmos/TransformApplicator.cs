@@ -1,7 +1,9 @@
 using System.Numerics;
+using Leed3D.Kernel.Entities;
 using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Scene;
 using Leed3D.Kernel.Selection;
+using Leed3D.Kernel.Texturing;
 
 namespace Leed3D.Kernel.Gizmos;
 
@@ -19,13 +21,27 @@ public sealed class TransformApplicator
         Quaternion StartRotationQuaternion,
         Vector3 StartScale);
 
+    private readonly record struct EntitySnapshot(
+        string EntityId,
+        Vector3 StartPosition,
+        Vector3 StartRotationEulerDegrees,
+        Quaternion StartRotationQuaternion,
+        Vector3 StartScale);
+
     private readonly record struct VertexSnapshot(
         int VertexId,
         Vector3 StartLocalPosition,
         Vector3 StartWorldPosition);
 
+    private readonly record struct FaceUvSnapshot(
+        int ObjectId,
+        int FaceId,
+        FaceUvMapping StartUvMapping);
+
     private readonly List<ObjectSnapshot> _objectSnapshots = [];
+    private readonly List<EntitySnapshot> _entitySnapshots = [];
     private readonly List<VertexSnapshot> _vertexSnapshots = [];
+    private readonly List<FaceUvSnapshot> _faceUvSnapshots = [];
 
     private InteractionMode _mode = InteractionMode.Object;
     private int? _activeObjectId;
@@ -33,7 +49,7 @@ public sealed class TransformApplicator
 
     public bool IsSessionActive { get; private set; }
     public Vector3 PivotWorld { get; private set; }
-    public int AffectedElementCount => _mode == InteractionMode.Object ? _objectSnapshots.Count : _vertexSnapshots.Count;
+    public int AffectedElementCount => _mode == InteractionMode.Object ? _objectSnapshots.Count + _entitySnapshots.Count : _vertexSnapshots.Count;
 
     /// <summary>
     /// Collects the union of all <see cref="MeshVertex.Id"/> values belonging to the currently selected
@@ -108,7 +124,9 @@ public sealed class TransformApplicator
         ArgumentNullException.ThrowIfNull(selection);
 
         _objectSnapshots.Clear();
+        _entitySnapshots.Clear();
         _vertexSnapshots.Clear();
+        _faceUvSnapshots.Clear();
 
         _mode = selection.Mode;
         PivotWorld = gizmoPivotWorld;
@@ -129,6 +147,29 @@ public sealed class TransformApplicator
                         obj.Transform.RotationEulerDegrees,
                         obj.Transform.GetRotationQuaternion(),
                         obj.Transform.Scale));
+
+                    if (obj.Mesh is { } objMesh)
+                    {
+                        for (int f = 0; f < objMesh.Faces.Count; f++)
+                        {
+                            PolygonFace face = objMesh.Faces[f];
+                            _faceUvSnapshots.Add(new FaceUvSnapshot(obj.Id, face.Id, face.UvMapping.Clone()));
+                        }
+                    }
+                }
+            }
+
+            foreach (string entId in selection.SelectedEntityIds)
+            {
+                LevelEntity? ent = scene.GetEntity(entId);
+                if (ent is not null && !ent.Locked)
+                {
+                    _entitySnapshots.Add(new EntitySnapshot(
+                        ent.Id,
+                        ent.Transform.Position,
+                        ent.Transform.RotationEulerDegrees,
+                        ent.Transform.GetRotationQuaternion(),
+                        ent.Transform.Scale));
                 }
             }
         }
@@ -148,6 +189,25 @@ public sealed class TransformApplicator
                     {
                         Vector3 worldPos = Vector3.Transform(vert.Position, localToWorld);
                         _vertexSnapshots.Add(new VertexSnapshot(vId, vert.Position, worldPos));
+                    }
+                }
+
+                for (int f = 0; f < mesh.Faces.Count; f++)
+                {
+                    PolygonFace face = mesh.Faces[f];
+                    bool touchesAffected = false;
+                    for (int k = 0; k < face.VertexIds.Count; k++)
+                    {
+                        if (affectedVerts.Contains(face.VertexIds[k]))
+                        {
+                            touchesAffected = true;
+                            break;
+                        }
+                    }
+
+                    if (touchesAffected)
+                    {
+                        _faceUvSnapshots.Add(new FaceUvSnapshot(activeObj.Id, face.Id, face.UvMapping.Clone()));
                     }
                 }
             }
@@ -207,6 +267,18 @@ public sealed class TransformApplicator
                     obj.Transform.Position = snap.StartPosition + worldDelta;
                 }
             }
+
+            for (int i = 0; i < _entitySnapshots.Count; i++)
+            {
+                EntitySnapshot snap = _entitySnapshots[i];
+                LevelEntity? ent = scene.GetEntity(snap.EntityId);
+                if (ent is not null)
+                {
+                    ent.Transform.Position = snap.StartPosition + worldDelta;
+                }
+            }
+
+            ApplyFaceUvTranslation(scene, worldDelta);
         }
         else if (_activeObjectId.HasValue)
         {
@@ -220,6 +292,8 @@ public sealed class TransformApplicator
                     Vector3 newLocal = Vector3.Transform(newWorld, _activeWorldToLocal);
                     mesh.SetVertexPosition(snap.VertexId, newLocal);
                 }
+
+                ApplyFaceUvTranslation(scene, worldDelta);
             }
         }
     }
@@ -245,7 +319,55 @@ public sealed class TransformApplicator
                 {
                     Vector3 offset = snap.StartPosition - PivotWorld;
                     obj.Transform.Position = PivotWorld + Vector3.Transform(offset, worldRotationDelta);
-                    obj.Transform.RotationEulerDegrees = snap.StartRotationEulerDegrees + eulerDeltaDegrees;
+                    obj.Transform.SetRotationFromQuaternion(Quaternion.Normalize(Quaternion.Concatenate(snap.StartRotationQuaternion, worldRotationDelta)));
+
+                    if (obj.Mesh is { } objMesh)
+                    {
+                        Quaternion netRot = Quaternion.Normalize(
+                            obj.Transform.GetRotationQuaternion() * Quaternion.Inverse(snap.StartRotationQuaternion));
+                        Vector3 frameTranslation = obj.Transform.Position - Vector3.Transform(snap.StartPosition, netRot);
+
+                        for (int f = 0; f < _faceUvSnapshots.Count; f++)
+                        {
+                            FaceUvSnapshot uvSnap = _faceUvSnapshots[f];
+                            if (uvSnap.ObjectId != obj.Id)
+                            {
+                                continue;
+                            }
+
+                            PolygonFace? face = objMesh.GetFace(uvSnap.FaceId);
+                            if (face is null)
+                            {
+                                continue;
+                            }
+
+                            face.UvMapping = uvSnap.StartUvMapping.Clone();
+                            if (face.UvMapping.TextureLock)
+                            {
+                                UvProjectionEngine.ApplyTransformToLockedUv(face.UvMapping, frameTranslation, netRot, Vector3.Zero);
+                            }
+                            else
+                            {
+                                UvProjectionEngine.RefreshUnlockedFaceAxes(face, objMesh, obj.Transform);
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (int i = 0; i < _entitySnapshots.Count; i++)
+            {
+                EntitySnapshot snap = _entitySnapshots[i];
+                LevelEntity? ent = scene.GetEntity(snap.EntityId);
+                if (ent is not null)
+                {
+                    Vector3 offset = snap.StartPosition - PivotWorld;
+                    ent.Transform.Position = PivotWorld + Vector3.Transform(offset, worldRotationDelta);
+                    ent.Transform.RotationEulerDegrees = snap.StartRotationEulerDegrees + eulerDeltaDegrees;
+                    if (ent.ClassName.Equals("player_spawn", StringComparison.OrdinalIgnoreCase) || ent.Properties.TryGet("yaw", out _))
+                    {
+                        ent.Properties.SetFloat("yaw", ent.Transform.RotationEulerDegrees.Y);
+                    }
                 }
             }
         }
@@ -261,6 +383,31 @@ public sealed class TransformApplicator
                     Vector3 newWorld = PivotWorld + Vector3.Transform(offset, worldRotationDelta);
                     Vector3 newLocal = Vector3.Transform(newWorld, _activeWorldToLocal);
                     mesh.SetVertexPosition(snap.VertexId, newLocal);
+                }
+
+                for (int f = 0; f < _faceUvSnapshots.Count; f++)
+                {
+                    FaceUvSnapshot uvSnap = _faceUvSnapshots[f];
+                    if (uvSnap.ObjectId != activeObj.Id)
+                    {
+                        continue;
+                    }
+
+                    PolygonFace? face = mesh.GetFace(uvSnap.FaceId);
+                    if (face is null)
+                    {
+                        continue;
+                    }
+
+                    face.UvMapping = uvSnap.StartUvMapping.Clone();
+                    if (face.UvMapping.TextureLock)
+                    {
+                        UvProjectionEngine.ApplyTransformToLockedUv(face.UvMapping, Vector3.Zero, worldRotationDelta, PivotWorld);
+                    }
+                    else
+                    {
+                        UvProjectionEngine.RefreshUnlockedFaceAxes(face, mesh, activeObj.Transform);
+                    }
                 }
             }
         }
@@ -293,6 +440,23 @@ public sealed class TransformApplicator
                         System.Math.Max(0.01f, snap.StartScale.Z * scaleMultiplier.Z));
                 }
             }
+
+            for (int i = 0; i < _entitySnapshots.Count; i++)
+            {
+                EntitySnapshot snap = _entitySnapshots[i];
+                LevelEntity? ent = scene.GetEntity(snap.EntityId);
+                if (ent is not null)
+                {
+                    Vector3 offset = snap.StartPosition - PivotWorld;
+                    ent.Transform.Position = PivotWorld + (offset * scaleMultiplier);
+                    ent.Transform.Scale = new Vector3(
+                        System.Math.Max(0.01f, snap.StartScale.X * scaleMultiplier.X),
+                        System.Math.Max(0.01f, snap.StartScale.Y * scaleMultiplier.Y),
+                        System.Math.Max(0.01f, snap.StartScale.Z * scaleMultiplier.Z));
+                }
+            }
+
+            ApplyFaceUvScale(scene, scaleMultiplier);
         }
         else if (_activeObjectId.HasValue)
         {
@@ -307,6 +471,8 @@ public sealed class TransformApplicator
                     Vector3 newLocal = Vector3.Transform(newWorld, _activeWorldToLocal);
                     mesh.SetVertexPosition(snap.VertexId, newLocal);
                 }
+
+                ApplyFaceUvScale(scene, scaleMultiplier);
             }
         }
     }
@@ -335,6 +501,22 @@ public sealed class TransformApplicator
                     obj.Transform.Scale = snap.StartScale;
                 }
             }
+
+            for (int i = 0; i < _entitySnapshots.Count; i++)
+            {
+                EntitySnapshot snap = _entitySnapshots[i];
+                LevelEntity? ent = scene.GetEntity(snap.EntityId);
+                if (ent is not null)
+                {
+                    ent.Transform.Position = snap.StartPosition;
+                    ent.Transform.RotationEulerDegrees = snap.StartRotationEulerDegrees;
+                    ent.Transform.Scale = snap.StartScale;
+                    if (ent.ClassName.Equals("player_spawn", StringComparison.OrdinalIgnoreCase) || ent.Properties.TryGet("yaw", out _))
+                    {
+                        ent.Properties.SetFloat("yaw", ent.Transform.RotationEulerDegrees.Y);
+                    }
+                }
+            }
         }
         else if (_activeObjectId.HasValue)
         {
@@ -346,6 +528,17 @@ public sealed class TransformApplicator
                     VertexSnapshot snap = _vertexSnapshots[i];
                     mesh.SetVertexPosition(snap.VertexId, snap.StartLocalPosition);
                 }
+            }
+        }
+
+        for (int f = 0; f < _faceUvSnapshots.Count; f++)
+        {
+            FaceUvSnapshot uvSnap = _faceUvSnapshots[f];
+            SceneObject? obj = scene.GetObject(uvSnap.ObjectId);
+            PolygonFace? face = obj?.Mesh?.GetFace(uvSnap.FaceId);
+            if (face is not null)
+            {
+                face.UvMapping = uvSnap.StartUvMapping.Clone();
             }
         }
     }
@@ -381,10 +574,69 @@ public sealed class TransformApplicator
         EndSessionInternal();
     }
 
+    private void ApplyFaceUvTranslation(EditorScene scene, Vector3 worldDelta)
+    {
+        for (int f = 0; f < _faceUvSnapshots.Count; f++)
+        {
+            FaceUvSnapshot uvSnap = _faceUvSnapshots[f];
+            SceneObject? obj = scene.GetObject(uvSnap.ObjectId);
+            if (obj?.Mesh is not { } mesh)
+            {
+                continue;
+            }
+
+            PolygonFace? face = mesh.GetFace(uvSnap.FaceId);
+            if (face is null)
+            {
+                continue;
+            }
+
+            face.UvMapping = uvSnap.StartUvMapping.Clone();
+            if (face.UvMapping.TextureLock)
+            {
+                UvProjectionEngine.ApplyTransformToLockedUv(face.UvMapping, worldDelta, Quaternion.Identity);
+            }
+            else
+            {
+                UvProjectionEngine.RefreshUnlockedFaceAxes(face, mesh, obj.Transform);
+            }
+        }
+    }
+
+    private void ApplyFaceUvScale(EditorScene scene, Vector3 scaleMultiplier)
+    {
+        for (int f = 0; f < _faceUvSnapshots.Count; f++)
+        {
+            FaceUvSnapshot uvSnap = _faceUvSnapshots[f];
+            SceneObject? obj = scene.GetObject(uvSnap.ObjectId);
+            if (obj?.Mesh is not { } mesh)
+            {
+                continue;
+            }
+
+            PolygonFace? face = mesh.GetFace(uvSnap.FaceId);
+            if (face is null)
+            {
+                continue;
+            }
+
+            face.UvMapping = uvSnap.StartUvMapping.Clone();
+            if (face.UvMapping.TextureLock)
+            {
+                UvProjectionEngine.ApplyScaleToLockedUv(face.UvMapping, scaleMultiplier, PivotWorld);
+            }
+            else
+            {
+                UvProjectionEngine.RefreshUnlockedFaceAxes(face, mesh, obj.Transform);
+            }
+        }
+    }
+
     private void EndSessionInternal()
     {
         IsSessionActive = false;
         _objectSnapshots.Clear();
         _vertexSnapshots.Clear();
+        _faceUvSnapshots.Clear();
     }
 }
