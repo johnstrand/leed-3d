@@ -316,4 +316,82 @@ public class SceneTests
         Assert.Same(liveMeshBBeforeRestore, scene.GetObject(objB.Id)!.Mesh);
         Assert.Equal(originalV0Pos, scene.GetObject(objA.Id)!.Mesh!.GetVertex(v0Id)!.Position);
     }
+
+    [Fact]
+    public void SceneClipboard_CopyCutPaste_ObjectsEntitiesAndFaceAttributes()
+    {
+        var scene = new EditorScene("ClipboardScene");
+        var undoStack = new UndoRedoStack();
+        var selection = new SelectionManager();
+        var clipboard = new SceneClipboard();
+
+        SceneObject box = scene.AddMeshObject("Crate", PrimitiveGenerator.CreateBox(new Vector3(2, 2, 2)), new Vector3(1, 2, 3));
+        box.Metadata.AddTag("wooden");
+        box.Metadata.SetProperty("mass", 42.5f);
+
+        var spawn = scene.CreateEntity("player_spawn", position: new Vector3(5, 0, -2));
+        spawn.Properties.SetProperty("team", "blue");
+
+        selection.SelectSingleObject(box.Id);
+        selection.ToggleSelectEntity(spawn.Id);
+
+        // Copy & Paste with offset
+        Assert.True(clipboard.Copy(scene, selection));
+        Assert.Equal(1, clipboard.CopiedObjectCount);
+        Assert.Equal(1, clipboard.CopiedEntityCount);
+
+        Assert.True(clipboard.Paste(scene, selection, undoStack, new Vector3(10, 0, 0)));
+        Assert.Equal(2, scene.ObjectCount);
+        Assert.Equal(2, scene.EntityCount);
+        Assert.Single(selection.SelectedObjectIds);
+        Assert.Single(selection.SelectedEntityIds);
+
+        int pastedBoxId = selection.SelectedObjectIds.First();
+        Assert.NotEqual(box.Id, pastedBoxId);
+        SceneObject pastedBox = scene.GetObject(pastedBoxId)!;
+        Assert.Equal(new Vector3(11, 2, 3), pastedBox.Transform.Position);
+        Assert.Contains("wooden", pastedBox.Metadata.Tags);
+        Assert.Equal(42.5f, pastedBox.Metadata.GetFloat("mass"));
+
+        string pastedEntId = selection.SelectedEntityIds.First();
+        Assert.NotEqual(spawn.Id, pastedEntId);
+        var pastedEnt = scene.GetEntity(pastedEntId)!;
+        Assert.Equal(new Vector3(15, 0, -2), pastedEnt.Transform.Position);
+        Assert.Equal("blue", pastedEnt.Properties.GetString("team"));
+
+        // Undo Paste
+        Assert.True(undoStack.Undo(scene, selection));
+        Assert.Equal(1, scene.ObjectCount);
+        Assert.Equal(1, scene.EntityCount);
+
+        // Cut original box & entity, then Paste back
+        selection.SelectSingleObject(box.Id);
+        selection.ToggleSelectEntity(spawn.Id);
+        Assert.True(clipboard.Cut(scene, selection, undoStack));
+        Assert.Equal(0, scene.ObjectCount);
+        Assert.Equal(0, scene.EntityCount);
+
+        Assert.True(clipboard.Paste(scene, selection, undoStack));
+        Assert.Equal(1, scene.ObjectCount);
+        Assert.Equal(1, scene.EntityCount);
+
+        // Face attribute Copy & Paste in Face Edit Mode
+        SceneObject targetBox = scene.Objects[0];
+        selection.SelectSingleObject(targetBox.Id);
+        selection.SetMode(InteractionMode.Face, scene);
+        int f0 = targetBox.Mesh!.Faces[0].Id;
+        int f1 = targetBox.Mesh.Faces[1].Id;
+        targetBox.Mesh.GetFace(f0)!.MaterialId = "dev_grid_orange";
+        targetBox.Mesh.GetFace(f0)!.UvMapping.Scale = new Vector2(2.0f, 3.0f);
+        targetBox.Mesh.GetFace(f0)!.Metadata.AddTag("climbable");
+
+        selection.SelectSingleFace(f0);
+        Assert.True(clipboard.Copy(scene, selection));
+
+        selection.SelectSingleFace(f1);
+        Assert.True(clipboard.Paste(scene, selection, undoStack));
+        Assert.Equal("dev_grid_orange", targetBox.Mesh.GetFace(f1)!.MaterialId);
+        Assert.Equal(new Vector2(2.0f, 3.0f), targetBox.Mesh.GetFace(f1)!.UvMapping.Scale);
+        Assert.Contains("climbable", targetBox.Mesh.GetFace(f1)!.Metadata.Tags);
+    }
 }

@@ -223,6 +223,23 @@ public sealed class EditorShortcutHandler
             return;
         }
 
+        // Clipboard: Cut (Ctrl+X), Copy (Ctrl+C), Paste (Ctrl+V)
+        if (ctrl && !shift && !alt && Raylib.IsKeyPressed(KeyboardKey.C))
+        {
+            _app.ExecuteCopy();
+            return;
+        }
+        else if (ctrl && !shift && !alt && Raylib.IsKeyPressed(KeyboardKey.X))
+        {
+            _app.ExecuteCut();
+            return;
+        }
+        else if (ctrl && !shift && !alt && Raylib.IsKeyPressed(KeyboardKey.V))
+        {
+            _app.ExecutePaste();
+            return;
+        }
+
         // F4: Toggle Lit Preview mode
         if (Raylib.IsKeyPressed(KeyboardKey.F4))
         {

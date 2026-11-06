@@ -49,6 +49,7 @@ public sealed class EditorApp : IDisposable
 
     public EditorScene Scene { get; } = new("Untitled Level");
     public UndoRedoStack UndoStack { get; } = new();
+    public SceneClipboard Clipboard { get; } = new();
     public EditorCamera Camera { get; } = new();
     public PrimitiveCreationController PrimitiveController { get; }
     public InteractiveEditController EditController { get; } = new();
@@ -624,6 +625,20 @@ public sealed class EditorApp : IDisposable
             {
                 UndoStack.Redo(Scene, Selection);
                 PrimitiveController.Dismiss();
+            }
+
+            ImGui.Separator();
+            if (ImGui.MenuItem("Cut", "Ctrl+X", false, SceneClipboard.CanCut(Scene, Selection)))
+            {
+                ExecuteCut();
+            }
+            if (ImGui.MenuItem("Copy", "Ctrl+C", false, SceneClipboard.CanCopy(Scene, Selection)))
+            {
+                ExecuteCopy();
+            }
+            if (ImGui.MenuItem("Paste", "Ctrl+V", false, Clipboard.CanPaste(Scene, Selection)))
+            {
+                ExecutePaste();
             }
 
             ImGui.Separator();
@@ -2215,6 +2230,49 @@ public sealed class EditorApp : IDisposable
     {
         Camera.FrameScene(Scene);
         StatusMessage = $"Framed entire scene at ({Camera.Target.X:0.#}, {Camera.Target.Y:0.#}, {Camera.Target.Z:0.#}).";
+    }
+
+    public void ExecuteCopy()
+    {
+        if (Clipboard.Copy(Scene, Selection))
+        {
+            PrimitiveController.Dismiss();
+            StatusMessage = Selection.Mode == InteractionMode.Face
+                ? "Copied face material, UV, and metadata attributes to clipboard."
+                : $"Copied {Clipboard.CopiedObjectCount} object(s) and {Clipboard.CopiedEntityCount} entity/entities to clipboard.";
+        }
+        else
+        {
+            StatusMessage = "Nothing selected to copy.";
+        }
+    }
+
+    public void ExecuteCut()
+    {
+        if (Clipboard.Cut(Scene, Selection, UndoStack))
+        {
+            PrimitiveController.Dismiss();
+            StatusMessage = $"Cut {Clipboard.CopiedObjectCount} object(s) and {Clipboard.CopiedEntityCount} entity/entities to clipboard.";
+        }
+        else
+        {
+            StatusMessage = "Select one or more objects or entities in Object Mode to cut.";
+        }
+    }
+
+    public void ExecutePaste()
+    {
+        if (Clipboard.Paste(Scene, Selection, UndoStack))
+        {
+            PrimitiveController.Dismiss();
+            StatusMessage = Selection.Mode == InteractionMode.Face
+                ? $"Pasted face attributes onto {Selection.SelectedFaceIds.Count} face(s)."
+                : $"Pasted {Selection.SelectedObjectIds.Count} object(s) and {Selection.SelectedEntityIds.Count} entity/entities.";
+        }
+        else
+        {
+            StatusMessage = "Clipboard is empty or cannot paste into current selection.";
+        }
     }
 
     /// <summary>
