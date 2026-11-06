@@ -30,6 +30,7 @@ public static class LevelBaker
         ArgumentNullException.ThrowIfNull(scene);
 
         var submeshByMaterial = new Dictionary<string, BakedSubmeshDto>(StringComparer.OrdinalIgnoreCase);
+        var vertexLookupByMaterial = new Dictionary<string, Dictionary<VertexDeduplicationKey, int>>(StringComparer.OrdinalIgnoreCase);
         var collisionTriangles = new List<BakedCollisionTriangleDto>();
 
         Vector3 minBounds = new(float.MaxValue, float.MaxValue, float.MaxValue);
@@ -68,6 +69,11 @@ public static class LevelBaker
                 {
                     submesh = new BakedSubmeshDto(matId);
                     submeshByMaterial[matId] = submesh;
+                }
+                if (!vertexLookupByMaterial.TryGetValue(matId, out Dictionary<VertexDeduplicationKey, int>? vertLookup))
+                {
+                    vertLookup = new Dictionary<VertexDeduplicationKey, int>();
+                    vertexLookupByMaterial[matId] = vertLookup;
                 }
 
                 Vector3 localNormal = face.ComputeNormal(mesh);
@@ -121,22 +127,13 @@ public static class LevelBaker
                         UpdateBounds(ref minBounds, ref maxBounds, ref hasGeometry, p2Rh);
 
                         // Winding flip for right-handed space: (0, 1, 2) -> (0, 2, 1)
-                        int baseIdx = submesh.Positions.Count;
-                        submesh.Positions.Add(p0Rh);
-                        submesh.Positions.Add(p2Rh);
-                        submesh.Positions.Add(p1Rh);
+                        int i0 = GetOrAddSubmeshVertex(submesh, vertLookup, p0Rh, nRh, uv0);
+                        int i1 = GetOrAddSubmeshVertex(submesh, vertLookup, p2Rh, nRh, uv2);
+                        int i2 = GetOrAddSubmeshVertex(submesh, vertLookup, p1Rh, nRh, uv1);
 
-                        submesh.Normals.Add(nRh);
-                        submesh.Normals.Add(nRh);
-                        submesh.Normals.Add(nRh);
-
-                        submesh.UVs.Add(uv0);
-                        submesh.UVs.Add(uv2);
-                        submesh.UVs.Add(uv1);
-
-                        submesh.Indices.Add(baseIdx);
-                        submesh.Indices.Add(baseIdx + 1);
-                        submesh.Indices.Add(baseIdx + 2);
+                        submesh.Indices.Add(i0);
+                        submesh.Indices.Add(i1);
+                        submesh.Indices.Add(i2);
 
                         submesh.FaceSourceIds.Add(face.Id);
 
@@ -157,22 +154,13 @@ public static class LevelBaker
                         UpdateBounds(ref minBounds, ref maxBounds, ref hasGeometry, p1);
                         UpdateBounds(ref minBounds, ref maxBounds, ref hasGeometry, p2);
 
-                        int baseIdx = submesh.Positions.Count;
-                        submesh.Positions.Add(p0);
-                        submesh.Positions.Add(p1);
-                        submesh.Positions.Add(p2);
+                        int i0 = GetOrAddSubmeshVertex(submesh, vertLookup, p0, worldNormal, uv0);
+                        int i1 = GetOrAddSubmeshVertex(submesh, vertLookup, p1, worldNormal, uv1);
+                        int i2 = GetOrAddSubmeshVertex(submesh, vertLookup, p2, worldNormal, uv2);
 
-                        submesh.Normals.Add(worldNormal);
-                        submesh.Normals.Add(worldNormal);
-                        submesh.Normals.Add(worldNormal);
-
-                        submesh.UVs.Add(uv0);
-                        submesh.UVs.Add(uv1);
-                        submesh.UVs.Add(uv2);
-
-                        submesh.Indices.Add(baseIdx);
-                        submesh.Indices.Add(baseIdx + 1);
-                        submesh.Indices.Add(baseIdx + 2);
+                        submesh.Indices.Add(i0);
+                        submesh.Indices.Add(i1);
+                        submesh.Indices.Add(i2);
 
                         submesh.FaceSourceIds.Add(face.Id);
 
@@ -244,10 +232,52 @@ public static class LevelBaker
         };
     }
 
+    private static int GetOrAddSubmeshVertex(
+        BakedSubmeshDto submesh,
+        Dictionary<VertexDeduplicationKey, int> lookup,
+        Vector3 position,
+        Vector3 normal,
+        Vector2 uv)
+    {
+        var key = VertexDeduplicationKey.Create(position, normal, uv);
+        if (lookup.TryGetValue(key, out int existingIndex))
+        {
+            return existingIndex;
+        }
+
+        int newIndex = submesh.Positions.Count;
+        submesh.Positions.Add(position);
+        submesh.Normals.Add(normal);
+        submesh.UVs.Add(uv);
+        lookup[key] = newIndex;
+        return newIndex;
+    }
+
     private static void UpdateBounds(ref Vector3 min, ref Vector3 max, ref bool hasGeometry, Vector3 p)
     {
         hasGeometry = true;
         min = Vector3.Min(min, p);
         max = Vector3.Max(max, p);
+    }
+}
+
+internal readonly record struct VertexDeduplicationKey(
+    int Px, int Py, int Pz,
+    int Nx, int Ny, int Nz,
+    int U, int V)
+{
+    private const float QuantizeScale = 100000.0f;
+
+    public static VertexDeduplicationKey Create(Vector3 pos, Vector3 normal, Vector2 uv)
+    {
+        return new VertexDeduplicationKey(
+            (int)MathF.Round(pos.X * QuantizeScale),
+            (int)MathF.Round(pos.Y * QuantizeScale),
+            (int)MathF.Round(pos.Z * QuantizeScale),
+            (int)MathF.Round(normal.X * QuantizeScale),
+            (int)MathF.Round(normal.Y * QuantizeScale),
+            (int)MathF.Round(normal.Z * QuantizeScale),
+            (int)MathF.Round(uv.X * QuantizeScale),
+            (int)MathF.Round(uv.Y * QuantizeScale));
     }
 }

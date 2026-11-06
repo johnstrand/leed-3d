@@ -1,13 +1,16 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Text.Json;
 using Leed3D.Kernel.Export;
 using Leed3D.Kernel.Geometry;
+using Leed3D.Kernel.IO;
 using Leed3D.Kernel.Primitives;
 using Leed3D.Kernel.Scene;
 using Leed3D.Kernel.Texturing;
+using Leed3D.Runtime;
 using Xunit;
 
 namespace Leed3D.Tests.Export;
@@ -316,5 +319,115 @@ public class MeshExporterTests
 
         Assert.Equal(-10.0f, minZ, 3);
         Assert.Equal(-10.0f, maxZ, 3);
+    }
+
+    [Fact]
+    public void ExportersAndLevelBaker_DeduplicateSharedVerticesWithinMaterialSubmeshes()
+    {
+        EditorScene scene = CreateSampleScene();
+
+        // 1. LevelBaker deduplication:
+        // MainCube (6 quads = 12 tris) has 24 unique (Position, Normal, UV) vertices instead of 36.
+        // PentagonWall (5-gon = 3 tris) has 5 unique (Position, Normal, UV) vertices instead of 9.
+        BakedRuntimeLayerData baked = LevelBaker.Bake(scene, rightHanded: true);
+        BakedSubmeshDto cubeSubmesh = baked.RenderSubmeshes.Single(s => s.MaterialId == "dev_grid_orange");
+        BakedSubmeshDto pentSubmesh = baked.RenderSubmeshes.Single(s => s.MaterialId == "dev_grid_blue");
+
+        Assert.Equal(24, cubeSubmesh.Positions.Count);
+        Assert.Equal(36, cubeSubmesh.Indices.Count);
+        Assert.Equal(5, pentSubmesh.Positions.Count);
+        Assert.Equal(9, pentSubmesh.Indices.Count);
+
+        // 2. ObjExporter deduplication:
+        // Total 'v ' lines = 24 (MainCube) + 5 (PentagonWall) = 29 (down from 45)
+        (string objContent, _) = ObjExporter.ExportToString(scene);
+        int objVertexLines = objContent.Split('\n').Count(line => line.StartsWith("v ", StringComparison.Ordinal));
+        Assert.Equal(29, objVertexLines);
+
+        // 3. GltfExporter deduplication:
+        string gltfJson = GltfExporter.ExportToString(scene);
+        using var doc = JsonDocument.Parse(gltfJson);
+        JsonElement accessors = doc.RootElement.GetProperty("accessors");
+        // Accessor 0 = MainCube POSITION (count 24), Accessor 3 = MainCube INDICES (count 36)
+        // Accessor 4 = PentagonWall POSITION (count 5), Accessor 7 = PentagonWall INDICES (count 9)
+        Assert.Equal(24, accessors[0].GetProperty("count").GetInt32());
+        Assert.Equal(36, accessors[3].GetProperty("count").GetInt32());
+        Assert.Equal(5, accessors[4].GetProperty("count").GetInt32());
+        Assert.Equal(9, accessors[7].GetProperty("count").GetInt32());
+    }
+
+    [Fact]
+    public void GltfExporter_SupportsOnlyObjectIds_NodeTrsTransforms_MetadataExtras_AndCustomTextures()
+    {
+        EditorScene scene = CreateSampleScene();
+        SceneObject cube = scene.Objects.First(o => o.Name == "MainCube");
+        cube.Transform.Position = new Vector3(3f, 4f, 5f);
+        cube.Transform.RotationEulerDegrees = new Vector3(0f, 90f, 0f);
+        cube.Transform.Scale = new Vector3(2f, 2f, 2f);
+        cube.Metadata.SetString("surface", "metal");
+        cube.Metadata.AddTag("climbable");
+
+        var spawn = scene.CreateEntity("player_spawn", "hero_start", new Vector3(1f, 0f, -2f));
+        spawn.Properties.SetInt("team", 1);
+
+        var customTextures = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["dev_grid_orange"] = "textures/orange_wall.png"
+        };
+
+        // 1. Export only MainCube with custom texture map
+        string filteredJson = GltfExporter.ExportToString(
+            scene,
+            embedBufferBase64: true,
+            onlyObjectIds: [cube.Id],
+            preserveNodeTransforms: true,
+            customTexturePaths: customTextures);
+
+        using (var filteredDoc = JsonDocument.Parse(filteredJson))
+        {
+            JsonElement root = filteredDoc.RootElement;
+            JsonElement nodes = root.GetProperty("nodes");
+            Assert.Equal(1, nodes.GetArrayLength());
+
+            JsonElement cubeNode = nodes[0];
+            Assert.Equal("MainCube", cubeNode.GetProperty("name").GetString());
+
+            // Right-handed translation: (3, 4, -5)
+            JsonElement trans = cubeNode.GetProperty("translation");
+            Assert.Equal(3f, trans[0].GetSingle(), 3);
+            Assert.Equal(4f, trans[1].GetSingle(), 3);
+            Assert.Equal(-5f, trans[2].GetSingle(), 3);
+
+            JsonElement scale = cubeNode.GetProperty("scale");
+            Assert.Equal(2f, scale[0].GetSingle(), 3);
+
+            // Node extras metadata
+            JsonElement extras = cubeNode.GetProperty("extras");
+            Assert.Equal("metal", extras.GetProperty("surface").GetString());
+            Assert.Equal("climbable", extras.GetProperty("tags")[0].GetString());
+
+            // Custom texture reference
+            Assert.Equal("orange_wall.png", root.GetProperty("images")[0].GetProperty("uri").GetString());
+            Assert.Equal(0, root.GetProperty("materials")[0].GetProperty("pbrMetallicRoughness").GetProperty("baseColorTexture").GetProperty("index").GetInt32());
+        }
+
+        // 2. Also verify ObjExporter emits map_Kd when customTexturePaths is provided
+        (_, string mtlContent) = ObjExporter.ExportToString(
+            scene,
+            onlyObjectIds: [cube.Id],
+            customTexturePaths: customTextures);
+        Assert.Contains("map_Kd orange_wall.png", mtlContent);
+
+        // 3. Full scene glTF export includes LevelEntity node with className in extras
+        string fullJson = GltfExporter.ExportToString(scene);
+        using (var fullDoc = JsonDocument.Parse(fullJson))
+        {
+            JsonElement nodes = fullDoc.RootElement.GetProperty("nodes");
+            Assert.Equal(3, nodes.GetArrayLength()); // MainCube, PentagonWall, hero_start
+            JsonElement entNode = nodes[2];
+            Assert.Equal("hero_start", entNode.GetProperty("name").GetString());
+            Assert.Equal("player_spawn", entNode.GetProperty("extras").GetProperty("className").GetString());
+            Assert.Equal(1, entNode.GetProperty("extras").GetProperty("team").GetInt32());
+        }
     }
 }

@@ -113,8 +113,11 @@ public sealed class EditorApp : IDisposable
     private string _saveAsLevelPath = "my_level.level.json";
     private string _exportObjPath = "export/my_level.obj";
     private bool _exportObjRightHanded = true;
+    private bool _exportObjSelectedOnly;
     private string _exportGltfPath = "export/my_level.gltf";
     private bool _exportGltfEmbedBase64 = true;
+    private bool _exportGltfSelectedOnly;
+    private bool _exportGltfPreserveNodeTransforms = true;
 
     private Vector3 _savedWalkCamPosition;
     private Vector3 _savedWalkCamTarget;
@@ -3221,6 +3224,7 @@ public sealed class EditorApp : IDisposable
             ImGui.InputText("Output Path##ExportObjInput", ref _exportObjPath, 256);
 
             ImGui.Checkbox("Convert to Right-Handed (OpenGL / glTF standard)", ref _exportObjRightHanded);
+            ImGui.Checkbox("Export Selected Objects Only", ref _exportObjSelectedOnly);
 
             ImGui.Separator();
 
@@ -3228,7 +3232,10 @@ public sealed class EditorApp : IDisposable
             {
                 try
                 {
-                    ObjExporter.Export(Scene, _exportObjPath, _exportObjRightHanded);
+                    IReadOnlyCollection<int>? onlyIds = _exportObjSelectedOnly && Selection.SelectedObjectIds.Count > 0
+                        ? Selection.SelectedObjectIds
+                        : null;
+                    ObjExporter.Export(Scene, _exportObjPath, _exportObjRightHanded, onlyIds, GetCustomTexturePathMap());
                     StatusMessage = $"Exported Wavefront OBJ to {_exportObjPath}";
                 }
                 catch (Exception ex)
@@ -3256,6 +3263,8 @@ public sealed class EditorApp : IDisposable
             ImGui.InputText("Output Path##ExportGltfInput", ref _exportGltfPath, 256);
 
             ImGui.Checkbox("Embed Binary Buffer as Base64", ref _exportGltfEmbedBase64);
+            ImGui.Checkbox("Export Selected Objects Only", ref _exportGltfSelectedOnly);
+            ImGui.Checkbox("Preserve Node TRS Transforms", ref _exportGltfPreserveNodeTransforms);
 
             ImGui.Separator();
 
@@ -3263,7 +3272,16 @@ public sealed class EditorApp : IDisposable
             {
                 try
                 {
-                    GltfExporter.Export(Scene, _exportGltfPath, _exportGltfEmbedBase64);
+                    IReadOnlyCollection<int>? onlyIds = _exportGltfSelectedOnly && Selection.SelectedObjectIds.Count > 0
+                        ? Selection.SelectedObjectIds
+                        : null;
+                    GltfExporter.Export(
+                        Scene,
+                        _exportGltfPath,
+                        _exportGltfEmbedBase64,
+                        onlyIds,
+                        _exportGltfPreserveNodeTransforms,
+                        GetCustomTexturePathMap());
                     StatusMessage = $"Exported glTF 2.0 to {_exportGltfPath}";
                 }
                 catch (Exception ex)
@@ -3280,6 +3298,20 @@ public sealed class EditorApp : IDisposable
 
             ImGui.EndPopup();
         }
+    }
+
+    private Dictionary<string, string>? GetCustomTexturePathMap()
+    {
+        Dictionary<string, string>? map = null;
+        foreach (MaterialEntry mat in MaterialLibrary.Materials)
+        {
+            if (!string.IsNullOrWhiteSpace(mat.FilePath))
+            {
+                map ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                map[mat.Id] = mat.FilePath;
+            }
+        }
+        return map;
     }
 
     private void DrawCsgPanel()

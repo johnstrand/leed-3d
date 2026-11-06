@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Numerics;
 using System.Text;
 using Leed3D.Kernel.Geometry;
+using Leed3D.Kernel.IO;
 using Leed3D.Kernel.Math;
 using Leed3D.Kernel.Scene;
 using Leed3D.Kernel.Texturing;
@@ -10,8 +11,8 @@ namespace Leed3D.Kernel.Export;
 
 /// <summary>
 /// Zero-dependency Wavefront <c>.obj</c> and companion <c>.mtl</c> mesh exporter.
-/// Automatically triangulates N-gon faces and converts left-handed editor coordinates
-/// to right-handed OpenGL/glTF space.
+/// Automatically triangulates N-gon faces, deduplicates shared vertices, and converts
+/// left-handed editor coordinates to right-handed OpenGL/glTF space.
 /// </summary>
 public static class ObjExporter
 {
@@ -23,11 +24,13 @@ public static class ObjExporter
     /// <param name="objFilePath">The output path for the <c>.obj</c> file.</param>
     /// <param name="convertToRightHanded">Whether to convert coordinates to right-handed OpenGL space (+X Right, +Y Up, -Z Forward).</param>
     /// <param name="onlyObjectIds">Optional collection of scene object IDs to restrict export to.</param>
+    /// <param name="customTexturePaths">Optional map of material ID to custom texture file path for <c>map_Kd</c>.</param>
     public static void Export(
         EditorScene scene,
         string objFilePath,
         bool convertToRightHanded = true,
-        IReadOnlyCollection<int>? onlyObjectIds = null)
+        IReadOnlyCollection<int>? onlyObjectIds = null,
+        IReadOnlyDictionary<string, string>? customTexturePaths = null)
     {
         ArgumentNullException.ThrowIfNull(scene);
         ArgumentException.ThrowIfNullOrWhiteSpace(objFilePath);
@@ -45,7 +48,8 @@ public static class ObjExporter
             scene,
             mtlFileName,
             convertToRightHanded,
-            onlyObjectIds);
+            onlyObjectIds,
+            customTexturePaths);
 
         File.WriteAllText(objFilePath, objContent, Encoding.UTF8);
         File.WriteAllText(mtlFilePath, mtlContent, Encoding.UTF8);
@@ -58,7 +62,8 @@ public static class ObjExporter
         EditorScene scene,
         string mtlFileName = "materials.mtl",
         bool convertToRightHanded = true,
-        IReadOnlyCollection<int>? onlyObjectIds = null)
+        IReadOnlyCollection<int>? onlyObjectIds = null,
+        IReadOnlyDictionary<string, string>? customTexturePaths = null)
     {
         ArgumentNullException.ThrowIfNull(scene);
 
@@ -112,6 +117,9 @@ public static class ObjExporter
                 referencedMaterials.Add(matId);
                 sbObj.AppendLine($"usemtl {matId}");
 
+                var vertLookup = new Dictionary<VertexDeduplicationKey, (int vIdx, int vtIdx, int vnIdx)>();
+                var normLookup = new Dictionary<(int Nx, int Ny, int Nz), int>();
+
                 foreach (PolygonFace face in matGroup)
                 {
                     IReadOnlyList<FaceTriangle> tris = face.GetTrianglesWithLocalIndices(mesh);
@@ -123,76 +131,58 @@ public static class ObjExporter
                     Vector3 localNormal = face.ComputeNormal(mesh);
                     Vector3 worldNormal = Vector3.Normalize(obj.Transform.TransformDirectionToWorld(localNormal));
                     IReadOnlyList<Vector2> faceUvs = UvProjectionEngine.ComputeFaceUvs(face, mesh, obj.Transform);
+                    Vector3 n = convertToRightHanded ? CoordSpace.ToRightHanded(worldNormal) : worldNormal;
+
+                    (int Nx, int Ny, int Nz) normKey = (
+                        (int)MathF.Round(n.X * 100000f),
+                        (int)MathF.Round(n.Y * 100000f),
+                        (int)MathF.Round(n.Z * 100000f));
+                    if (!normLookup.TryGetValue(normKey, out int faceVnIdx))
+                    {
+                        WriteNormal(sbObj, n);
+                        faceVnIdx = vnIndex++;
+                        normLookup[normKey] = faceVnIdx;
+                    }
 
                     for (int tIdx = 0; tIdx < tris.Count; tIdx++)
                     {
                         FaceTriangle tri = tris[tIdx];
-                        int v0Id = tri.V0;
-                        int v1Id = tri.V1;
-                        int v2Id = tri.V2;
-
-                        MeshVertex? mv0 = mesh.GetVertex(v0Id);
-                        MeshVertex? mv1 = mesh.GetVertex(v1Id);
-                        MeshVertex? mv2 = mesh.GetVertex(v2Id);
+                        MeshVertex? mv0 = mesh.GetVertex(tri.V0);
+                        MeshVertex? mv1 = mesh.GetVertex(tri.V1);
+                        MeshVertex? mv2 = mesh.GetVertex(tri.V2);
                         if (mv0 is null || mv1 is null || mv2 is null)
                         {
                             continue;
                         }
 
-                        int idx0 = tri.I0;
-                        int idx1 = tri.I1;
-                        int idx2 = tri.I2;
-
-                        Vector2 uv0 = idx0 >= 0 && idx0 < faceUvs.Count ? faceUvs[idx0] : Vector2.Zero;
-                        Vector2 uv1 = idx1 >= 0 && idx1 < faceUvs.Count ? faceUvs[idx1] : Vector2.Zero;
-                        Vector2 uv2 = idx2 >= 0 && idx2 < faceUvs.Count ? faceUvs[idx2] : Vector2.Zero;
+                        Vector2 uv0 = tri.I0 >= 0 && tri.I0 < faceUvs.Count ? faceUvs[tri.I0] : Vector2.Zero;
+                        Vector2 uv1 = tri.I1 >= 0 && tri.I1 < faceUvs.Count ? faceUvs[tri.I1] : Vector2.Zero;
+                        Vector2 uv2 = tri.I2 >= 0 && tri.I2 < faceUvs.Count ? faceUvs[tri.I2] : Vector2.Zero;
 
                         Vector3 p0 = obj.Transform.TransformPointToWorld(mv0.Position);
                         Vector3 p1 = obj.Transform.TransformPointToWorld(mv1.Position);
                         Vector3 p2 = obj.Transform.TransformPointToWorld(mv2.Position);
-                        Vector3 n = worldNormal;
 
                         if (convertToRightHanded)
                         {
                             p0 = CoordSpace.ToRightHanded(p0);
                             p1 = CoordSpace.ToRightHanded(p1);
                             p2 = CoordSpace.ToRightHanded(p2);
-                            n = CoordSpace.ToRightHanded(n);
 
-                            // Triangle winding flip for right-handed space: (p0, p2, p1), (uv0, uv2, uv1)
-                            WriteVertex(sbObj, p0);
-                            WriteVertex(sbObj, p2);
-                            WriteVertex(sbObj, p1);
+                            // Winding flip for right-handed space: (p0, p2, p1), (uv0, uv2, uv1)
+                            (int v0, int vt0, int vn0) = GetOrWriteObjVertex(sbObj, vertLookup, p0, n, uv0, faceVnIdx, ref vIndex, ref vtIndex);
+                            (int v2, int vt2, int vn2) = GetOrWriteObjVertex(sbObj, vertLookup, p2, n, uv2, faceVnIdx, ref vIndex, ref vtIndex);
+                            (int v1, int vt1, int vn1) = GetOrWriteObjVertex(sbObj, vertLookup, p1, n, uv1, faceVnIdx, ref vIndex, ref vtIndex);
 
-                            WriteTexCoord(sbObj, uv0);
-                            WriteTexCoord(sbObj, uv2);
-                            WriteTexCoord(sbObj, uv1);
-
-                            WriteNormal(sbObj, n);
-
-                            sbObj.AppendLine(CultureInfo.InvariantCulture, $"f {vIndex}/{vtIndex}/{vnIndex} {vIndex + 1}/{vtIndex + 1}/{vnIndex} {vIndex + 2}/{vtIndex + 2}/{vnIndex}");
-
-                            vIndex += 3;
-                            vtIndex += 3;
-                            vnIndex += 1;
+                            sbObj.AppendLine(CultureInfo.InvariantCulture, $"f {v0}/{vt0}/{vn0} {v2}/{vt2}/{vn2} {v1}/{vt1}/{vn1}");
                         }
                         else
                         {
-                            WriteVertex(sbObj, p0);
-                            WriteVertex(sbObj, p1);
-                            WriteVertex(sbObj, p2);
+                            (int v0, int vt0, int vn0) = GetOrWriteObjVertex(sbObj, vertLookup, p0, n, uv0, faceVnIdx, ref vIndex, ref vtIndex);
+                            (int v1, int vt1, int vn1) = GetOrWriteObjVertex(sbObj, vertLookup, p1, n, uv1, faceVnIdx, ref vIndex, ref vtIndex);
+                            (int v2, int vt2, int vn2) = GetOrWriteObjVertex(sbObj, vertLookup, p2, n, uv2, faceVnIdx, ref vIndex, ref vtIndex);
 
-                            WriteTexCoord(sbObj, uv0);
-                            WriteTexCoord(sbObj, uv1);
-                            WriteTexCoord(sbObj, uv2);
-
-                            WriteNormal(sbObj, n);
-
-                            sbObj.AppendLine(CultureInfo.InvariantCulture, $"f {vIndex}/{vtIndex}/{vnIndex} {vIndex + 1}/{vtIndex + 1}/{vnIndex} {vIndex + 2}/{vtIndex + 2}/{vnIndex}");
-
-                            vIndex += 3;
-                            vtIndex += 3;
-                            vnIndex += 1;
+                            sbObj.AppendLine(CultureInfo.InvariantCulture, $"f {v0}/{vt0}/{vn0} {v1}/{vt1}/{vn1} {v2}/{vt2}/{vn2}");
                         }
                     }
                 }
@@ -215,10 +205,39 @@ public static class ObjExporter
             sbMtl.AppendLine("Ks 0.000000 0.000000 0.000000");
             sbMtl.AppendLine("d 1.000000");
             sbMtl.AppendLine("illum 2");
+            if (customTexturePaths is not null &&
+                customTexturePaths.TryGetValue(matId, out string? texPath) &&
+                !string.IsNullOrWhiteSpace(texPath))
+            {
+                sbMtl.AppendLine($"map_Kd {Path.GetFileName(texPath)}");
+            }
             sbMtl.AppendLine();
         }
 
         return (sbObj.ToString(), sbMtl.ToString());
+    }
+
+    private static (int vIdx, int vtIdx, int vnIdx) GetOrWriteObjVertex(
+        StringBuilder sb,
+        Dictionary<VertexDeduplicationKey, (int vIdx, int vtIdx, int vnIdx)> lookup,
+        Vector3 p,
+        Vector3 n,
+        Vector2 uv,
+        int vnIdx,
+        ref int vIndex,
+        ref int vtIndex)
+    {
+        var key = VertexDeduplicationKey.Create(p, n, uv);
+        if (lookup.TryGetValue(key, out var existing))
+        {
+            return existing;
+        }
+
+        WriteVertex(sb, p);
+        WriteTexCoord(sb, uv);
+        var created = (vIndex++, vtIndex++, vnIdx);
+        lookup[key] = created;
+        return created;
     }
 
     private static void WriteVertex(StringBuilder sb, Vector3 p)
