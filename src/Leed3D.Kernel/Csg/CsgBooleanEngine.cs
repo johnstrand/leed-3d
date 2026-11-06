@@ -26,6 +26,156 @@ public static class CsgBooleanEngine
     public const float WeldEpsilon = 1e-4f;
 
     /// <summary>
+    /// Validates that <paramref name="mesh"/> is a closed manifold 3D solid with non-zero volume
+    /// suitable for CSG boolean operations.
+    /// </summary>
+    public static bool ValidateClosedManifold(EditableMesh? mesh, out string? errorReason)
+    {
+        if (mesh is null)
+        {
+            errorReason = "mesh is empty or null.";
+            return false;
+        }
+
+        if (mesh.FaceCount == 0 || mesh.VertexCount == 0)
+        {
+            errorReason = "mesh has no geometry.";
+            return false;
+        }
+
+        TopologyGraph topology = mesh.GetTopology();
+
+        // Check for non-manifold edges (> 2 incident faces) or inconsistent winding on 2-face edges
+        for (int i = 0; i < topology.Edges.Count; i++)
+        {
+            TopologyEdge edge = topology.Edges[i];
+            if (edge.IncidentFaceIds.Count > 2)
+            {
+                errorReason = "mesh has non-manifold edges shared by more than 2 faces.";
+                return false;
+            }
+        }
+
+        if (!topology.IsClosedManifold())
+        {
+            bool hasUnmatched = false;
+            for (int i = 0; i < topology.HalfEdges.Count; i++)
+            {
+                if (!topology.HalfEdges[i].TwinHalfEdgeId.HasValue)
+                {
+                    hasUnmatched = true;
+                    break;
+                }
+            }
+
+            if (!hasUnmatched || !AreBoundaryHalfEdgesCoveredByTJunctions(mesh, topology))
+            {
+                bool hasBoundary = false;
+                for (int i = 0; i < topology.Edges.Count; i++)
+                {
+                    if (topology.Edges[i].IsBoundary || topology.Edges[i].IncidentFaceIds.Count < 2)
+                    {
+                        hasBoundary = true;
+                        break;
+                    }
+                }
+
+                errorReason = hasBoundary
+                    ? "mesh has open boundary edges (CSG requires closed manifold 3D solids)."
+                    : "mesh has inconsistent face winding along shared edges.";
+                return false;
+            }
+        }
+
+        if (mesh.FaceCount < 4 || mesh.VertexCount < 4)
+        {
+            errorReason = $"mesh has only {mesh.FaceCount} face(s) (CSG requires a closed 3D solid with at least 4 faces).";
+            return false;
+        }
+
+        BoundingBox3D bounds = mesh.ComputeBoundingBox();
+        Vector3 size = bounds.Size;
+        if (size.X <= 1e-5f || size.Y <= 1e-5f || size.Z <= 1e-5f)
+        {
+            errorReason = "mesh has zero 3D volume.";
+            return false;
+        }
+
+        errorReason = null;
+        return true;
+    }
+
+    /// <summary>
+    /// Validates that both <paramref name="target"/> and <paramref name="cutter"/> are closed manifold solids,
+    /// evaluates the requested CSG <paramref name="operation"/>, and rejects empty results.
+    /// </summary>
+    public static bool TryEvaluate(
+        SceneObject target,
+        SceneObject cutter,
+        CsgOperation operation,
+        out EditableMesh? resultMesh,
+        out string? errorMessage)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(cutter);
+
+        return TryEvaluate(
+            target.Mesh,
+            target.Transform,
+            cutter.Mesh,
+            cutter.Transform,
+            operation,
+            out resultMesh,
+            out errorMessage,
+            target.Name,
+            cutter.Name);
+    }
+
+    /// <summary>
+    /// Validates that both <paramref name="meshA"/> and <paramref name="meshB"/> are closed manifold solids,
+    /// evaluates the requested CSG <paramref name="operation"/>, and rejects empty results.
+    /// </summary>
+    public static bool TryEvaluate(
+        EditableMesh? meshA,
+        Transform3D transformA,
+        EditableMesh? meshB,
+        Transform3D transformB,
+        CsgOperation operation,
+        out EditableMesh? resultMesh,
+        out string? errorMessage,
+        string targetName = "Target",
+        string cutterName = "Cutter")
+    {
+        ArgumentNullException.ThrowIfNull(transformA);
+        ArgumentNullException.ThrowIfNull(transformB);
+
+        resultMesh = null;
+
+        if (!ValidateClosedManifold(meshA, out string? targetError))
+        {
+            errorMessage = $"CSG {operation} rejected: Target '{targetName}' {targetError}";
+            return false;
+        }
+
+        if (!ValidateClosedManifold(meshB, out string? cutterError))
+        {
+            errorMessage = $"CSG {operation} rejected: Cutter '{cutterName}' {cutterError}";
+            return false;
+        }
+
+        EditableMesh evaluated = Evaluate(meshA!, transformA, meshB!, transformB, operation);
+        if (evaluated.FaceCount < 4 || evaluated.VertexCount < 4)
+        {
+            errorMessage = $"CSG {operation} warning: operation between '{targetName}' and '{cutterName}' resulted in an empty mesh; original objects were kept.";
+            return false;
+        }
+
+        resultMesh = evaluated;
+        errorMessage = null;
+        return true;
+    }
+
+    /// <summary>
     /// Evaluates a CSG boolean operation between two <see cref="SceneObject"/> instances and returns
     /// the resulting <see cref="EditableMesh"/> in <paramref name="objectA"/>'s local coordinate space.
     /// </summary>
@@ -322,6 +472,93 @@ public static class CsgBooleanEngine
 
         mesh.ValidateAndRepair();
         return mesh;
+    }
+
+    private static bool AreBoundaryHalfEdgesCoveredByTJunctions(EditableMesh mesh, TopologyGraph topology)
+    {
+        var unmatched = new List<(Vector3 Start, Vector3 End, Vector3 Dir, float Length)>();
+        for (int i = 0; i < topology.HalfEdges.Count; i++)
+        {
+            DirectedHalfEdge he = topology.HalfEdges[i];
+            if (he.TwinHalfEdgeId.HasValue)
+            {
+                continue;
+            }
+
+            MeshVertex? vOrig = mesh.GetVertex(he.OriginVertexId);
+            MeshVertex? vTarg = mesh.GetVertex(he.TargetVertexId);
+            if (vOrig is null || vTarg is null)
+            {
+                return false;
+            }
+
+            Vector3 edgeVec = vTarg.Position - vOrig.Position;
+            float len = edgeVec.Length();
+            if (len <= 1e-5f)
+            {
+                continue;
+            }
+
+            unmatched.Add((vOrig.Position, vTarg.Position, edgeVec / len, len));
+        }
+
+        if (unmatched.Count == 0)
+        {
+            return false;
+        }
+
+        const float collinearDotThreshold = -0.9995f;
+        const float lineDistEpsSq = 1e-6f;
+
+        for (int i = 0; i < unmatched.Count; i++)
+        {
+            var (startA, _, dirA, lenA) = unmatched[i];
+            float coveredLength = 0.0f;
+
+            for (int j = 0; j < unmatched.Count; j++)
+            {
+                if (i == j)
+                {
+                    continue;
+                }
+
+                var (startB, endB, dirB, _) = unmatched[j];
+                if (Vector3.Dot(dirA, dirB) > collinearDotThreshold)
+                {
+                    continue;
+                }
+
+                Vector3 toStartB = startB - startA;
+                float t0 = Vector3.Dot(toStartB, dirA);
+                Vector3 perp0 = toStartB - (dirA * t0);
+                if (perp0.LengthSquared() > lineDistEpsSq)
+                {
+                    continue;
+                }
+
+                Vector3 toEndB = endB - startA;
+                float t1 = Vector3.Dot(toEndB, dirA);
+                Vector3 perp1 = toEndB - (dirA * t1);
+                if (perp1.LengthSquared() > lineDistEpsSq)
+                {
+                    continue;
+                }
+
+                float segMin = System.Math.Max(0.0f, System.Math.Min(t0, t1));
+                float segMax = System.Math.Min(lenA, System.Math.Max(t0, t1));
+                if (segMax > segMin)
+                {
+                    coveredLength += segMax - segMin;
+                }
+            }
+
+            if (MathF.Abs(coveredLength - lenA) > System.Math.Max(1e-3f, lenA * 1e-2f))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool IsConvexPolygon(IReadOnlyList<Vector3> vertices, Vector3 normal)

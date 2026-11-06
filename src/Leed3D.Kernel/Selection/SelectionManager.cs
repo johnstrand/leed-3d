@@ -21,6 +21,7 @@ public enum InteractionMode
 public sealed class SelectionManager
 {
     private readonly HashSet<int> _selectedObjectIds = [];
+    private readonly List<int> _orderedSelectedObjectIds = [];
     private readonly HashSet<string> _selectedEntityIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<int> _selectedVertexIds = [];
     private readonly HashSet<EdgeKey> _selectedEdges = [];
@@ -31,6 +32,7 @@ public sealed class SelectionManager
     public string? ActiveEntityId { get; set; }
 
     public IReadOnlySet<int> SelectedObjectIds => _selectedObjectIds;
+    public IReadOnlyList<int> OrderedSelectedObjectIds => _orderedSelectedObjectIds;
     public IReadOnlySet<string> SelectedEntityIds => _selectedEntityIds;
     public IReadOnlySet<int> SelectedVertexIds => _selectedVertexIds;
     public IReadOnlySet<EdgeKey> SelectedEdges => _selectedEdges;
@@ -60,13 +62,15 @@ public sealed class SelectionManager
         {
             if (ActiveObjectId is null || (scene != null && scene.GetObject(ActiveObjectId.Value) is null))
             {
-                ActiveObjectId = _selectedObjectIds.Count > 0 ? _selectedObjectIds.First() : null;
+                ActiveObjectId = _orderedSelectedObjectIds.Count > 0 ? _orderedSelectedObjectIds[0] : null;
             }
 
             if (ActiveObjectId.HasValue)
             {
                 _selectedObjectIds.Clear();
+                _orderedSelectedObjectIds.Clear();
                 _selectedObjectIds.Add(ActiveObjectId.Value);
+                _orderedSelectedObjectIds.Add(ActiveObjectId.Value);
             }
         }
 
@@ -96,8 +100,10 @@ public sealed class SelectionManager
     public void SelectSingleObject(int objectId)
     {
         _selectedObjectIds.Clear();
+        _orderedSelectedObjectIds.Clear();
         _selectedEntityIds.Clear();
         _selectedObjectIds.Add(objectId);
+        _orderedSelectedObjectIds.Add(objectId);
         ActiveObjectId = objectId;
         ActiveEntityId = null;
         ClearSubElementSelection();
@@ -108,14 +114,16 @@ public sealed class SelectionManager
         if (_selectedObjectIds.Contains(objectId))
         {
             _selectedObjectIds.Remove(objectId);
+            _orderedSelectedObjectIds.Remove(objectId);
             if (ActiveObjectId == objectId)
             {
-                ActiveObjectId = _selectedObjectIds.Count > 0 ? _selectedObjectIds.First() : null;
+                ActiveObjectId = _orderedSelectedObjectIds.Count > 0 ? _orderedSelectedObjectIds[^1] : null;
             }
         }
         else
         {
             _selectedObjectIds.Add(objectId);
+            _orderedSelectedObjectIds.Add(objectId);
             ActiveObjectId = objectId;
         }
         ClearSubElementSelection();
@@ -125,6 +133,7 @@ public sealed class SelectionManager
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(entityId);
         _selectedObjectIds.Clear();
+        _orderedSelectedObjectIds.Clear();
         _selectedEntityIds.Clear();
         _selectedEntityIds.Add(entityId);
         ActiveEntityId = entityId;
@@ -227,12 +236,42 @@ public sealed class SelectionManager
     {
         ArgumentNullException.ThrowIfNull(objectIds);
         _selectedObjectIds.Clear();
+        _orderedSelectedObjectIds.Clear();
         foreach (int id in objectIds)
         {
-            _selectedObjectIds.Add(id);
+            if (_selectedObjectIds.Add(id))
+            {
+                _orderedSelectedObjectIds.Add(id);
+            }
         }
-        ActiveObjectId = _selectedObjectIds.Count > 0 ? _selectedObjectIds.First() : null;
+        ActiveObjectId = _orderedSelectedObjectIds.Count > 0 ? _orderedSelectedObjectIds[0] : null;
         ClearSubElementSelection();
+    }
+
+    /// <summary>
+    /// Resolves the CSG Target (A) and Cutter(s) (B) from the current object selection.
+    /// Convention: first-selected object = Target (A); subsequent selected objects (ending with <see cref="ActiveObjectId"/>) = Cutter(s) (B).
+    /// </summary>
+    public bool TryGetCsgTargetAndCutters(out int targetId, out List<int> cutterIds)
+    {
+        targetId = 0;
+        cutterIds = [];
+
+        if (_orderedSelectedObjectIds.Count < 2)
+        {
+            if (_orderedSelectedObjectIds.Count == 1)
+            {
+                targetId = _orderedSelectedObjectIds[0];
+            }
+            return false;
+        }
+
+        targetId = _orderedSelectedObjectIds[0];
+        for (int i = 1; i < _orderedSelectedObjectIds.Count; i++)
+        {
+            cutterIds.Add(_orderedSelectedObjectIds[i]);
+        }
+        return cutterIds.Count > 0;
     }
 
     public void ClearSelection()
@@ -241,6 +280,7 @@ public sealed class SelectionManager
         {
             case InteractionMode.Object:
                 _selectedObjectIds.Clear();
+                _orderedSelectedObjectIds.Clear();
                 _selectedEntityIds.Clear();
                 ActiveObjectId = null;
                 ActiveEntityId = null;
@@ -271,12 +311,16 @@ public sealed class SelectionManager
         {
             case InteractionMode.Object:
                 _selectedObjectIds.Clear();
+                _orderedSelectedObjectIds.Clear();
                 _selectedEntityIds.Clear();
                 foreach (SceneObject obj in scene.Objects)
                 {
                     if (obj.Visible && !obj.Locked)
                     {
-                        _selectedObjectIds.Add(obj.Id);
+                        if (_selectedObjectIds.Add(obj.Id))
+                        {
+                            _orderedSelectedObjectIds.Add(obj.Id);
+                        }
                     }
                 }
                 foreach (LevelEntity entity in scene.Entities)
@@ -286,9 +330,9 @@ public sealed class SelectionManager
                         _selectedEntityIds.Add(entity.Id);
                     }
                 }
-                if (_selectedObjectIds.Count > 0 && (!ActiveObjectId.HasValue || !_selectedObjectIds.Contains(ActiveObjectId.Value)))
+                if (_orderedSelectedObjectIds.Count > 0 && (!ActiveObjectId.HasValue || !_selectedObjectIds.Contains(ActiveObjectId.Value)))
                 {
-                    ActiveObjectId = _selectedObjectIds.First();
+                    ActiveObjectId = _orderedSelectedObjectIds[0];
                 }
                 if (_selectedEntityIds.Count > 0 && (string.IsNullOrEmpty(ActiveEntityId) || !_selectedEntityIds.Contains(ActiveEntityId)))
                 {
@@ -345,8 +389,15 @@ public sealed class SelectionManager
                 }
 
                 _selectedObjectIds.Clear();
-                foreach (int id in newObjSelection) _selectedObjectIds.Add(id);
-                ActiveObjectId = _selectedObjectIds.Count > 0 ? _selectedObjectIds.First() : null;
+                _orderedSelectedObjectIds.Clear();
+                foreach (int id in newObjSelection)
+                {
+                    if (_selectedObjectIds.Add(id))
+                    {
+                        _orderedSelectedObjectIds.Add(id);
+                    }
+                }
+                ActiveObjectId = _orderedSelectedObjectIds.Count > 0 ? _orderedSelectedObjectIds[0] : null;
 
                 _selectedEntityIds.Clear();
                 foreach (string id in newEntSelection) _selectedEntityIds.Add(id);

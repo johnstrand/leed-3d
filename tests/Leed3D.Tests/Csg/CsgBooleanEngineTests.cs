@@ -4,6 +4,8 @@ using Leed3D.Kernel.Geometry;
 using Leed3D.Kernel.Math;
 using Leed3D.Kernel.Primitives;
 using Leed3D.Kernel.Scene;
+using Leed3D.Kernel.Selection;
+using Leed3D.Kernel.Tools;
 
 namespace Leed3D.Tests.Csg;
 
@@ -311,6 +313,122 @@ public sealed class CsgBooleanEngineTests
         EditableMesh intersectMesh = CsgBooleanEngine.Evaluate(boxA, transformA, boxB, transformB, CsgOperation.Intersect);
         Assert.Equal(0, intersectMesh.FaceCount);
         Assert.Equal(0, intersectMesh.VertexCount);
+    }
+
+    [Fact]
+    public void ValidateClosedManifold_ClosedSolidsPass_OpenMeshesFailWithClearReason()
+    {
+        EditableMesh box = PrimitiveGenerator.CreateBox(new Vector3(2f, 2f, 2f));
+        Assert.True(CsgBooleanEngine.ValidateClosedManifold(box, out string? boxErr));
+        Assert.Null(boxErr);
+
+        EditableMesh cylinder = PrimitiveGenerator.CreateCylinder(1f, 2f, radialSegments: 12);
+        Assert.True(CsgBooleanEngine.ValidateClosedManifold(cylinder, out _));
+
+        // Carved wall with centered window opening (has collinear T-junction edges) must still pass closed-manifold check
+        EditableMesh wall = PrimitiveGenerator.CreateBox(new Vector3(10f, 4f, 0.5f));
+        EditableMesh window = PrimitiveGenerator.CreateBox(new Vector3(2f, 1.5f, 2f));
+        EditableMesh carvedWall = CsgBooleanEngine.Evaluate(wall, window, CsgOperation.Subtract);
+        Assert.True(CsgBooleanEngine.ValidateClosedManifold(carvedWall, out string? carvedErr), carvedErr ?? string.Empty);
+
+        // Open Plane must be rejected
+        EditableMesh plane = PrimitiveGenerator.CreatePlane(4f, 4f, 2, 2);
+        Assert.False(CsgBooleanEngine.ValidateClosedManifold(plane, out string? planeErr));
+        Assert.NotNull(planeErr);
+        Assert.Contains("boundary", planeErr, StringComparison.OrdinalIgnoreCase);
+
+        // Box with 1 missing face must be rejected
+        EditableMesh openBox = PrimitiveGenerator.CreateBox(new Vector3(2f, 2f, 2f));
+        openBox.RemoveFace(openBox.Faces[0].Id);
+        openBox.ValidateAndRepair();
+        Assert.False(CsgBooleanEngine.ValidateClosedManifold(openBox, out string? openBoxErr));
+        Assert.NotNull(openBoxErr);
+        Assert.Contains("boundary", openBoxErr, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ExecuteCsgBoolean_SelectionOrder_FirstSelectedIsTarget_LastSelectedIsCutter_AcrossAllOperations()
+    {
+        foreach (CsgOperation op in new[] { CsgOperation.Union, CsgOperation.Subtract, CsgOperation.Intersect })
+        {
+            var scene = new EditorScene($"OrderTest_{op}");
+            SceneObject targetObj = scene.AddMeshObject("TargetA", PrimitiveGenerator.CreateBox(new Vector3(4f, 4f, 4f)), Vector3.Zero);
+            SceneObject cutterObj = scene.AddMeshObject("CutterB", PrimitiveGenerator.CreateBox(new Vector3(2f, 2f, 2f)), new Vector3(1.5f, 0f, 0f));
+
+            var selection = new SelectionManager();
+            // Click TargetA first, Shift+Click CutterB second (so ActiveObjectId == CutterB)
+            selection.SelectSingleObject(targetObj.Id);
+            selection.ToggleSelectObject(cutterObj.Id);
+            Assert.Equal(cutterObj.Id, selection.ActiveObjectId);
+            Assert.True(selection.TryGetCsgTargetAndCutters(out int resolvedTargetId, out List<int> resolvedCutters));
+            Assert.Equal(targetObj.Id, resolvedTargetId);
+            Assert.Equal([cutterObj.Id], resolvedCutters);
+
+            var undo = new UndoRedoStack();
+            var controller = new InteractiveEditController();
+
+            bool ok = controller.ExecuteCsgBoolean(scene, selection, op, deleteCutter: true, undo);
+            Assert.True(ok, controller.LastOperationMessage ?? string.Empty);
+
+            // TargetA must survive with modified mesh, and CutterB must be deleted
+            Assert.NotNull(scene.GetObject(targetObj.Id));
+            Assert.Null(scene.GetObject(cutterObj.Id));
+            Assert.Equal(targetObj.Id, selection.ActiveObjectId);
+        }
+    }
+
+    [Fact]
+    public void ExecuteCsgBoolean_OpenMeshOrEmptyResult_RejectsWithWarningAndKeepsOriginalMeshes()
+    {
+        var controller = new InteractiveEditController();
+
+        // 1. Open Plane rejected
+        var planeScene = new EditorScene("OpenMeshScene");
+        SceneObject boxObj = planeScene.AddMeshObject("Box", PrimitiveGenerator.CreateBox(new Vector3(2f, 2f, 2f)), Vector3.Zero);
+        SceneObject planeObj = planeScene.AddMeshObject("FloorPlane", PrimitiveGenerator.CreatePlane(4f, 4f), Vector3.Zero);
+        var planeSelection = new SelectionManager();
+        planeSelection.SelectSingleObject(boxObj.Id);
+        planeSelection.ToggleSelectObject(planeObj.Id);
+        var planeUndo = new UndoRedoStack();
+
+        Assert.False(controller.ExecuteCsgBoolean(planeScene, planeSelection, CsgOperation.Subtract, deleteCutter: true, planeUndo));
+        Assert.NotNull(controller.LastOperationMessage);
+        Assert.Contains("FloorPlane", controller.LastOperationMessage, StringComparison.Ordinal);
+        Assert.Equal(2, planeScene.ObjectCount);
+        Assert.False(planeUndo.CanUndo);
+
+        // 2. Disjoint Intersect produces empty mesh -> rejected with warning, originals kept
+        var disjointScene = new EditorScene("DisjointIntersectScene");
+        SceneObject disjointA = disjointScene.AddMeshObject("BoxA", PrimitiveGenerator.CreateBox(new Vector3(2f, 2f, 2f)), new Vector3(-10f, 0f, 0f));
+        SceneObject disjointB = disjointScene.AddMeshObject("BoxB", PrimitiveGenerator.CreateBox(new Vector3(2f, 2f, 2f)), new Vector3(10f, 0f, 0f));
+        var disjointSel = new SelectionManager();
+        disjointSel.SelectSingleObject(disjointA.Id);
+        disjointSel.ToggleSelectObject(disjointB.Id);
+        var disjointUndo = new UndoRedoStack();
+
+        Assert.False(controller.ExecuteCsgBoolean(disjointScene, disjointSel, CsgOperation.Intersect, deleteCutter: true, disjointUndo));
+        Assert.NotNull(controller.LastOperationMessage);
+        Assert.Contains("empty mesh", controller.LastOperationMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(2, disjointScene.ObjectCount);
+        Assert.Equal(6, disjointScene.GetObject(disjointA.Id)!.Mesh!.FaceCount);
+        Assert.Equal(6, disjointScene.GetObject(disjointB.Id)!.Mesh!.FaceCount);
+        Assert.False(disjointUndo.CanUndo);
+
+        // 3. Subtract where Cutter completely encloses Target -> empty mesh -> rejected with warning, originals kept
+        var encloseScene = new EditorScene("EncloseSubtractScene");
+        SceneObject smallTarget = encloseScene.AddMeshObject("SmallTarget", PrimitiveGenerator.CreateBox(new Vector3(2f, 2f, 2f)), Vector3.Zero);
+        SceneObject hugeCutter = encloseScene.AddMeshObject("HugeCutter", PrimitiveGenerator.CreateBox(new Vector3(10f, 10f, 10f)), Vector3.Zero);
+        var encloseSel = new SelectionManager();
+        encloseSel.SelectSingleObject(smallTarget.Id);
+        encloseSel.ToggleSelectObject(hugeCutter.Id);
+        var encloseUndo = new UndoRedoStack();
+
+        Assert.False(controller.ExecuteCsgBoolean(encloseScene, encloseSel, CsgOperation.Subtract, deleteCutter: true, encloseUndo));
+        Assert.NotNull(controller.LastOperationMessage);
+        Assert.Contains("empty mesh", controller.LastOperationMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(2, encloseScene.ObjectCount);
+        Assert.Equal(6, encloseScene.GetObject(smallTarget.Id)!.Mesh!.FaceCount);
+        Assert.False(encloseUndo.CanUndo);
     }
 
     private sealed class Vector3Comparer(float tolerance) : IEqualityComparer<Vector3>

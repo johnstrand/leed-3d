@@ -2918,18 +2918,39 @@ public sealed class EditorApp : IDisposable
             return;
         }
 
-        int selCount = Selection.SelectedObjectIds.Count;
-        int? primaryId = Selection.ActiveObjectId ?? (selCount > 0 ? Selection.SelectedObjectIds.First() : null);
-        SceneObject? primaryObj = primaryId.HasValue ? Scene.GetObject(primaryId.Value) : null;
-        int? secondaryId = selCount >= 2 ? Selection.SelectedObjectIds.FirstOrDefault(id => id != primaryId) : null;
-        SceneObject? secondaryObj = secondaryId.HasValue ? Scene.GetObject(secondaryId.Value) : null;
+        bool hasPair = Selection.TryGetCsgTargetAndCutters(out int targetId, out List<int> cutterIds);
+        SceneObject? targetObj = (hasPair || Selection.OrderedSelectedObjectIds.Count == 1) && targetId != 0
+            ? Scene.GetObject(targetId)
+            : null;
+        int? cutterId = cutterIds.Count > 0 ? cutterIds[^1] : null;
+        SceneObject? cutterObj = cutterId.HasValue ? Scene.GetObject(cutterId.Value) : null;
 
-        string targetName = primaryObj != null ? primaryObj.Name : "(None)";
-        string cutterName = secondaryObj != null ? secondaryObj.Name : "(None)";
+        string targetName = targetObj != null ? targetObj.Name : "(None)";
+        string cutterName = cutterObj != null
+            ? (cutterIds.Count > 1 ? $"{cutterObj.Name} (+{cutterIds.Count - 1} more)" : cutterObj.Name)
+            : "(None)";
 
         ImGui.Text("CSG Pair Assignment:");
         ImGui.BulletText($"Target (A): {targetName}");
         ImGui.BulletText($"Cutter (B): {cutterName}");
+
+        string? manifoldWarning = null;
+        if (targetObj?.Mesh != null && !CsgBooleanEngine.ValidateClosedManifold(targetObj.Mesh, out string? targetErr))
+        {
+            manifoldWarning = $"Target '{targetObj.Name}': {targetErr}";
+        }
+        else if (cutterObj?.Mesh != null && !CsgBooleanEngine.ValidateClosedManifold(cutterObj.Mesh, out string? cutterErr))
+        {
+            manifoldWarning = $"Cutter '{cutterObj.Name}': {cutterErr}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(manifoldWarning))
+        {
+            ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(1.0f, 0.45f, 0.35f, 1.0f));
+            ImGui.TextWrapped(manifoldWarning);
+            ImGui.PopStyleColor();
+        }
+
         ImGui.Separator();
 
         bool deleteCutter = CsgDeleteCutter;
@@ -2941,7 +2962,7 @@ public sealed class EditorApp : IDisposable
         ImGui.Separator();
         ImGui.TextDisabled("Operations:");
 
-        bool csgReady = selCount >= 2;
+        bool csgReady = hasPair && manifoldWarning is null;
         if (!csgReady) ImGui.BeginDisabled();
 
         if (ImGui.Button("Union (A ∪ B)##CsgUnion", new Vector2(-1, 0)))
@@ -2975,7 +2996,8 @@ public sealed class EditorApp : IDisposable
 
         ImGui.Separator();
         ImGui.TextDisabled("TrenchBroom-Style Carve:");
-        if (!Selection.HasSelection) ImGui.BeginDisabled();
+        bool canCarve = Selection.OrderedSelectedObjectIds.Count > 0 && manifoldWarning is null;
+        if (!canCarve) ImGui.BeginDisabled();
         if (ImGui.Button("Carve Overlapping Meshes##CsgCarve", new Vector2(-1, 0)))
         {
             ExecuteCsgCarve();
@@ -2984,7 +3006,7 @@ public sealed class EditorApp : IDisposable
         {
             SetCsgPreview(new Color(240, 50, 50, 255));
         }
-        if (!Selection.HasSelection) ImGui.EndDisabled();
+        if (!canCarve) ImGui.EndDisabled();
 
         ImGui.End();
     }
@@ -2993,8 +3015,12 @@ public sealed class EditorApp : IDisposable
     {
         if (EditController.ExecuteCsgBoolean(Scene, Selection, CsgOperation.Union, CsgDeleteCutter, UndoStack))
         {
-            StatusMessage = "CSG Union completed.";
+            StatusMessage = EditController.LastOperationMessage ?? "CSG Union completed.";
             ClearCsgPreview();
+        }
+        else if (!string.IsNullOrWhiteSpace(EditController.LastOperationMessage))
+        {
+            StatusMessage = EditController.LastOperationMessage;
         }
     }
 
@@ -3002,8 +3028,12 @@ public sealed class EditorApp : IDisposable
     {
         if (EditController.ExecuteCsgBoolean(Scene, Selection, CsgOperation.Subtract, CsgDeleteCutter, UndoStack))
         {
-            StatusMessage = "CSG Subtract / Carve completed.";
+            StatusMessage = EditController.LastOperationMessage ?? "CSG Subtract / Carve completed.";
             ClearCsgPreview();
+        }
+        else if (!string.IsNullOrWhiteSpace(EditController.LastOperationMessage))
+        {
+            StatusMessage = EditController.LastOperationMessage;
         }
     }
 
@@ -3011,8 +3041,12 @@ public sealed class EditorApp : IDisposable
     {
         if (EditController.ExecuteCsgBoolean(Scene, Selection, CsgOperation.Intersect, CsgDeleteCutter, UndoStack))
         {
-            StatusMessage = "CSG Intersect completed.";
+            StatusMessage = EditController.LastOperationMessage ?? "CSG Intersect completed.";
             ClearCsgPreview();
+        }
+        else if (!string.IsNullOrWhiteSpace(EditController.LastOperationMessage))
+        {
+            StatusMessage = EditController.LastOperationMessage;
         }
     }
 
@@ -3020,8 +3054,12 @@ public sealed class EditorApp : IDisposable
     {
         if (EditController.ExecuteCarve(Scene, Selection, CsgDeleteCutter, UndoStack))
         {
-            StatusMessage = "TrenchBroom Carve completed.";
+            StatusMessage = EditController.LastOperationMessage ?? "TrenchBroom Carve completed.";
             ClearCsgPreview();
+        }
+        else if (!string.IsNullOrWhiteSpace(EditController.LastOperationMessage))
+        {
+            StatusMessage = EditController.LastOperationMessage;
         }
     }
 
@@ -3029,11 +3067,22 @@ public sealed class EditorApp : IDisposable
     {
         if (Selection.Mode != InteractionMode.Object) return;
 
-        int? primaryId = Selection.ActiveObjectId ?? (Selection.SelectedObjectIds.Count > 0 ? Selection.SelectedObjectIds.First() : null);
-        int? secondaryId = Selection.SelectedObjectIds.Count >= 2 ? Selection.SelectedObjectIds.FirstOrDefault(id => id != primaryId) : null;
+        if (Selection.TryGetCsgTargetAndCutters(out int targetId, out List<int> cutterIds))
+        {
+            CsgPreviewTargetId = targetId;
+            CsgPreviewCutterId = cutterIds[^1];
+        }
+        else if (Selection.OrderedSelectedObjectIds.Count == 1)
+        {
+            CsgPreviewTargetId = null;
+            CsgPreviewCutterId = Selection.OrderedSelectedObjectIds[0];
+        }
+        else
+        {
+            CsgPreviewTargetId = null;
+            CsgPreviewCutterId = null;
+        }
 
-        CsgPreviewTargetId = primaryId;
-        CsgPreviewCutterId = secondaryId ?? primaryId;
         CsgCutterWireColor = cutterWireColor;
     }
 

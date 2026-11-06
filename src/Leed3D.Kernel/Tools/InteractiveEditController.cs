@@ -61,6 +61,11 @@ public sealed class InteractiveEditController
     public string ModifierPreviewName { get; private set; } = string.Empty;
     private EditorScene? _modifierPreviewSnapshot;
 
+    /// <summary>
+    /// Status, warning, or error message produced by the most recent operation (such as CSG boolean validation or empty-result warnings).
+    /// </summary>
+    public string? LastOperationMessage { get; private set; }
+
     // Numeric input buffer
     public string NumericInputBuffer { get; private set; } = string.Empty;
     public bool HasNumericInput => !string.IsNullOrEmpty(NumericInputBuffer);
@@ -918,6 +923,7 @@ public sealed class InteractiveEditController
 
     /// <summary>
     /// Executes a CSG Boolean operation (Union, Subtract, Intersect) between selected objects.
+    /// Convention: first-selected object = Target (A); subsequent selected objects (ending with <see cref="SelectionManager.ActiveObjectId"/>) = Cutter(s) (B).
     /// <paramref name="deleteCutter"/> specifies whether cutter brush objects are deleted (true)
     /// or retained and hidden as wireframe guides (false).
     /// </summary>
@@ -932,122 +938,102 @@ public sealed class InteractiveEditController
         ArgumentNullException.ThrowIfNull(selection);
         ArgumentNullException.ThrowIfNull(undoStack);
 
-        if (selection.Mode != InteractionMode.Object || selection.SelectedObjectIds.Count < 2)
+        if (selection.Mode != InteractionMode.Object || !selection.TryGetCsgTargetAndCutters(out int targetId, out List<int> cutterIds))
         {
+            LastOperationMessage = "CSG Boolean requires at least 2 selected objects in Object Mode (first selected = Target A, second selected = Cutter B).";
             return false;
         }
 
-        // ActiveObjectId is the primary object. If not set, pick the first in selection.
-        int primaryId = selection.ActiveObjectId ?? selection.SelectedObjectIds.First();
-        var otherIds = selection.SelectedObjectIds.Where(id => id != primaryId).ToList();
-
-        if (otherIds.Count == 0)
+        SceneObject? targetObj = scene.GetObject(targetId);
+        if (targetObj?.Mesh is null)
         {
+            LastOperationMessage = "CSG Target (A) has no mesh.";
             return false;
         }
 
-        SceneObject? primaryObj = scene.GetObject(primaryId);
-        if (primaryObj?.Mesh is null)
+        if (!CsgBooleanEngine.ValidateClosedManifold(targetObj.Mesh, out string? targetError))
         {
+            LastOperationMessage = $"CSG {operation} rejected: Target '{targetObj.Name}' {targetError}";
             return false;
+        }
+
+        var cutters = new List<SceneObject>(cutterIds.Count);
+        for (int i = 0; i < cutterIds.Count; i++)
+        {
+            SceneObject? cutter = scene.GetObject(cutterIds[i]);
+            if (cutter?.Mesh is null)
+            {
+                LastOperationMessage = "CSG Cutter (B) has no mesh.";
+                return false;
+            }
+
+            if (!CsgBooleanEngine.ValidateClosedManifold(cutter.Mesh, out string? cutterError))
+            {
+                LastOperationMessage = $"CSG {operation} rejected: Cutter '{cutter.Name}' {cutterError}";
+                return false;
+            }
+
+            cutters.Add(cutter);
+        }
+
+        if (cutters.Count == 0)
+        {
+            LastOperationMessage = "No valid cutter objects selected.";
+            return false;
+        }
+
+        EditableMesh currentMesh = targetObj.Mesh;
+        for (int i = 0; i < cutters.Count; i++)
+        {
+            SceneObject cutter = cutters[i];
+            if (!CsgBooleanEngine.TryEvaluate(
+                    currentMesh,
+                    targetObj.Transform,
+                    cutter.Mesh,
+                    cutter.Transform,
+                    operation,
+                    out EditableMesh? stepMesh,
+                    out string? errorMessage,
+                    targetObj.Name,
+                    cutter.Name) || stepMesh is null)
+            {
+                LastOperationMessage = errorMessage;
+                return false;
+            }
+
+            currentMesh = stepMesh;
         }
 
         EditorScene before = scene.CloneSnapshot();
+        targetObj.Mesh = currentMesh;
 
-        switch (operation)
+        for (int i = 0; i < cutters.Count; i++)
         {
-            case CsgOperation.Union:
+            SceneObject cutter = cutters[i];
+            if (deleteCutter)
             {
-                // Target is primary, other selected objects are unioned into it
-                for (int i = 0; i < otherIds.Count; i++)
-                {
-                    SceneObject? cutter = scene.GetObject(otherIds[i]);
-                    if (cutter?.Mesh is null) continue;
-
-                    primaryObj.Mesh = CsgBooleanEngine.Evaluate(primaryObj, cutter, CsgOperation.Union);
-
-                    if (deleteCutter)
-                    {
-                        scene.RemoveObject(cutter.Id);
-                    }
-                    else
-                    {
-                        cutter.Visible = false;
-                    }
-                }
-
-                selection.ClearSelection();
-                selection.SelectSingleObject(primaryObj.Id);
-                undoStack.RecordAction($"CSG Union ({otherIds.Count} object(s))", before, scene);
-                return true;
+                scene.RemoveObject(cutter.Id);
             }
-
-            case CsgOperation.Subtract:
+            else
             {
-                // Active object is the cutter (brush carver). Subtract cutter from all other selected objects!
-                SceneObject cutter = primaryObj;
-                var targetsCarved = new List<int>();
-
-                for (int i = 0; i < otherIds.Count; i++)
-                {
-                    SceneObject? target = scene.GetObject(otherIds[i]);
-                    if (target?.Mesh is null) continue;
-
-                    target.Mesh = CsgBooleanEngine.Evaluate(target, cutter, CsgOperation.Subtract);
-                    targetsCarved.Add(target.Id);
-                }
-
-                if (deleteCutter)
-                {
-                    scene.RemoveObject(cutter.Id);
-                    selection.ClearSelection();
-                    if (targetsCarved.Count > 0)
-                    {
-                        for (int i = 0; i < targetsCarved.Count; i++)
-                        {
-                            selection.ToggleSelectObject(targetsCarved[i]);
-                        }
-                        selection.ActiveObjectId = targetsCarved[0];
-                    }
-                }
-                else
-                {
-                    cutter.Visible = false;
-                }
-
-                undoStack.RecordAction($"CSG Subtract / Carve ({targetsCarved.Count} target(s))", before, scene);
-                return true;
+                cutter.Visible = false;
             }
-
-            case CsgOperation.Intersect:
-            {
-                // Primary is target, intersect with each other selected object
-                for (int i = 0; i < otherIds.Count; i++)
-                {
-                    SceneObject? cutter = scene.GetObject(otherIds[i]);
-                    if (cutter?.Mesh is null) continue;
-
-                    primaryObj.Mesh = CsgBooleanEngine.Evaluate(primaryObj, cutter, CsgOperation.Intersect);
-
-                    if (deleteCutter)
-                    {
-                        scene.RemoveObject(cutter.Id);
-                    }
-                    else
-                    {
-                        cutter.Visible = false;
-                    }
-                }
-
-                selection.ClearSelection();
-                selection.SelectSingleObject(primaryObj.Id);
-                undoStack.RecordAction($"CSG Intersect ({otherIds.Count} object(s))", before, scene);
-                return true;
-            }
-
-            default:
-                return false;
         }
+
+        selection.ClearSelection();
+        selection.SelectSingleObject(targetObj.Id);
+
+        string actionLabel = operation switch
+        {
+            CsgOperation.Union => $"CSG Union ({cutters.Count} object(s))",
+            CsgOperation.Subtract => $"CSG Subtract / Carve ({cutters.Count} object(s))",
+            CsgOperation.Intersect => $"CSG Intersect ({cutters.Count} object(s))",
+            _ => $"CSG {operation}"
+        };
+
+        undoStack.RecordAction(actionLabel, before, scene);
+        LastOperationMessage = $"{actionLabel} completed on '{targetObj.Name}'.";
+        return true;
     }
 
     /// <summary>
@@ -1066,37 +1052,51 @@ public sealed class InteractiveEditController
 
         if (selection.Mode != InteractionMode.Object)
         {
+            LastOperationMessage = "Switch to Object Mode to use CSG Carve.";
             return false;
         }
 
-        int? cutterId = selection.ActiveObjectId ?? (selection.SelectedObjectIds.Count > 0 ? selection.SelectedObjectIds.First() : null);
+        int? cutterId = selection.ActiveObjectId ?? (selection.OrderedSelectedObjectIds.Count > 0 ? selection.OrderedSelectedObjectIds[^1] : null);
         if (!cutterId.HasValue)
         {
+            LastOperationMessage = "Select a cutter object to carve with.";
             return false;
         }
 
         SceneObject? cutter = scene.GetObject(cutterId.Value);
         if (cutter?.Mesh is null)
         {
+            LastOperationMessage = "Selected cutter has no mesh.";
+            return false;
+        }
+
+        if (!CsgBooleanEngine.ValidateClosedManifold(cutter.Mesh, out string? cutterError))
+        {
+            LastOperationMessage = $"CSG Carve rejected: Cutter '{cutter.Name}' {cutterError}";
             return false;
         }
 
         // Determine targets:
         // If 2+ objects are selected, target the other selected objects.
-        // If only 1 object is selected (the cutter), target all other scene objects whose world bounding box intersects cutter's world bounds!
+        // If only 1 object is selected (the cutter), target all other closed-manifold scene objects whose world bounding box intersects cutter's world bounds.
         List<SceneObject> targets = [];
         BoundingBox3D cutterBounds = cutter.GetWorldBounds();
 
         if (selection.SelectedObjectIds.Count > 1)
         {
-            foreach (int id in selection.SelectedObjectIds)
+            foreach (int id in selection.OrderedSelectedObjectIds)
             {
                 if (id == cutter.Id) continue;
                 SceneObject? obj = scene.GetObject(id);
-                if (obj?.Mesh is not null)
+                if (obj?.Mesh is null) continue;
+
+                if (!CsgBooleanEngine.ValidateClosedManifold(obj.Mesh, out string? targetError))
                 {
-                    targets.Add(obj);
+                    LastOperationMessage = $"CSG Carve rejected: Target '{obj.Name}' {targetError}";
+                    return false;
                 }
+
+                targets.Add(obj);
             }
         }
         else
@@ -1106,7 +1106,8 @@ public sealed class InteractiveEditController
                 SceneObject obj = scene.Objects[i];
                 if (obj.Id == cutter.Id || obj.Mesh is null || !obj.Visible) continue;
 
-                if (cutterBounds.Intersects(obj.GetWorldBounds()))
+                if (cutterBounds.Intersects(obj.GetWorldBounds()) &&
+                    CsgBooleanEngine.ValidateClosedManifold(obj.Mesh, out _))
                 {
                     targets.Add(obj);
                 }
@@ -1115,16 +1116,30 @@ public sealed class InteractiveEditController
 
         if (targets.Count == 0)
         {
+            LastOperationMessage = "CSG Carve: no overlapping closed-manifold target meshes found.";
             return false;
         }
 
-        EditorScene before = scene.CloneSnapshot();
-        var carvedIds = new List<int>(targets.Count);
-
+        var carvedMeshes = new List<(SceneObject Target, EditableMesh Mesh)>(targets.Count);
         for (int i = 0; i < targets.Count; i++)
         {
             SceneObject target = targets[i];
-            target.Mesh = CsgBooleanEngine.Evaluate(target, cutter, CsgOperation.Subtract);
+            if (!CsgBooleanEngine.TryEvaluate(target, cutter, CsgOperation.Subtract, out EditableMesh? carvedMesh, out string? evalError) || carvedMesh is null)
+            {
+                LastOperationMessage = evalError;
+                return false;
+            }
+
+            carvedMeshes.Add((target, carvedMesh));
+        }
+
+        EditorScene before = scene.CloneSnapshot();
+        var carvedIds = new List<int>(carvedMeshes.Count);
+
+        for (int i = 0; i < carvedMeshes.Count; i++)
+        {
+            (SceneObject target, EditableMesh mesh) = carvedMeshes[i];
+            target.Mesh = mesh;
             carvedIds.Add(target.Id);
         }
 
@@ -1144,6 +1159,7 @@ public sealed class InteractiveEditController
         }
 
         undoStack.RecordAction($"CSG Carve ({carvedIds.Count} object(s))", before, scene);
+        LastOperationMessage = $"CSG Carve completed ({carvedIds.Count} target(s)).";
         return true;
     }
 
