@@ -19,7 +19,19 @@ public sealed class UvInspectorPanel
     {
         ArgumentNullException.ThrowIfNull(app);
 
-        ImGui.Begin("UV Inspector");
+        if (!app.ShowUvInspector)
+        {
+            return;
+        }
+
+        bool show = app.ShowUvInspector;
+        if (!ImGui.Begin("UV Inspector", ref show))
+        {
+            app.ShowUvInspector = show;
+            ImGui.End();
+            return;
+        }
+        app.ShowUvInspector = show;
 
         List<(SceneObject Obj, PolygonFace Face)> targetFaces = GetTargetFaces(app);
 

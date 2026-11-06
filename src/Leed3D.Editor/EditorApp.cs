@@ -37,7 +37,15 @@ public sealed class EditorApp : IDisposable
     private readonly ViewportRenderer _viewportRenderer = new();
     private readonly EditorSettings _settings;
     private bool _exitRequested;
+    private bool _windowCloseIntercepted;
     private bool _resetLayoutRequested;
+
+    public bool ShowSceneOutliner { get; set; } = true;
+    public bool ShowTransformInspector { get; set; } = true;
+    public bool ShowTextureBrowser { get; set; } = true;
+    public bool ShowUvInspector { get; set; } = true;
+    public bool ShowMetadataInspector { get; set; } = true;
+    public bool ShowCsgPanel { get; set; } = true;
 
     public EditorScene Scene { get; } = new("Untitled Level");
     public UndoRedoStack UndoStack { get; } = new();
@@ -82,13 +90,15 @@ public sealed class EditorApp : IDisposable
         None,
         NewLevel,
         OpenLevel,
-        LoadSampleTempleBlockout
+        LoadSampleTempleBlockout,
+        ExitApplication
     }
 
     private PendingDocumentAction _pendingActionAfterSaveAs = PendingDocumentAction.None;
     private bool _openNewLevelModal;
     private bool _openUnsavedBeforeOpenModal;
     private bool _openUnsavedBeforeSampleModal;
+    private bool _openUnsavedBeforeExitModal;
     private bool _openOpenLevelModal;
     private bool _openOpenLevelErrorModal;
     private bool _openSaveLevelAsModal;
@@ -392,8 +402,23 @@ public sealed class EditorApp : IDisposable
         RlImGui.Setup(darkTheme: true, enableDocking: true, _settings.UiScaleMultiplier);
         _viewportRenderer.EnsureSize(1280, 720);
 
-        while (!Raylib.WindowShouldClose())
+        while (!_exitRequested)
         {
+            if (Raylib.WindowShouldClose())
+            {
+                if (!HasUnsavedChanges)
+                {
+                    _exitRequested = true;
+                    break;
+                }
+
+                if (!_windowCloseIntercepted)
+                {
+                    _windowCloseIntercepted = true;
+                    RequestExit();
+                }
+            }
+
             float dt = Raylib.GetFrameTime();
             HandleGlobalShortcuts();
             if (IsWalkModeActive)
@@ -580,7 +605,7 @@ public sealed class EditorApp : IDisposable
             ImGui.Separator();
             if (ImGui.MenuItem("Exit"))
             {
-                _exitRequested = true;
+                RequestExit();
             }
             ImGui.EndMenu();
         }
@@ -727,11 +752,42 @@ public sealed class EditorApp : IDisposable
 
         if (ImGui.BeginMenu("Window"))
         {
-            ImGui.MenuItem("Scene Outliner", null, true);
-            ImGui.MenuItem("Transform Inspector", null, true);
-            ImGui.MenuItem("Texture Browser", null, true);
-            ImGui.MenuItem("UV Inspector", null, true);
-            ImGui.MenuItem("Metadata Inspector", null, true);
+            bool showOutliner = ShowSceneOutliner;
+            if (ImGui.MenuItem("Scene Outliner", null, ref showOutliner))
+            {
+                ShowSceneOutliner = showOutliner;
+            }
+
+            bool showTransform = ShowTransformInspector;
+            if (ImGui.MenuItem("Transform Inspector", null, ref showTransform))
+            {
+                ShowTransformInspector = showTransform;
+            }
+
+            bool showTextures = ShowTextureBrowser;
+            if (ImGui.MenuItem("Texture Browser", null, ref showTextures))
+            {
+                ShowTextureBrowser = showTextures;
+            }
+
+            bool showUv = ShowUvInspector;
+            if (ImGui.MenuItem("UV Inspector", null, ref showUv))
+            {
+                ShowUvInspector = showUv;
+            }
+
+            bool showMetadata = ShowMetadataInspector;
+            if (ImGui.MenuItem("Metadata Inspector", null, ref showMetadata))
+            {
+                ShowMetadataInspector = showMetadata;
+            }
+
+            bool showCsg = ShowCsgPanel;
+            if (ImGui.MenuItem("CSG Booleans", null, ref showCsg))
+            {
+                ShowCsgPanel = showCsg;
+            }
+
             ImGui.EndMenu();
         }
 
@@ -2521,6 +2577,21 @@ public sealed class EditorApp : IDisposable
             case PendingDocumentAction.LoadSampleTempleBlockout:
                 LoadSampleTempleBlockout();
                 break;
+            case PendingDocumentAction.ExitApplication:
+                _exitRequested = true;
+                break;
+        }
+    }
+
+    public void RequestExit()
+    {
+        if (HasUnsavedChanges)
+        {
+            _openUnsavedBeforeExitModal = true;
+        }
+        else
+        {
+            _exitRequested = true;
         }
     }
 
@@ -2540,6 +2611,11 @@ public sealed class EditorApp : IDisposable
         {
             ImGui.OpenPopup("Unsaved Changes##SampleLevelUnsavedModal");
             _openUnsavedBeforeSampleModal = false;
+        }
+        if (_openUnsavedBeforeExitModal)
+        {
+            ImGui.OpenPopup("Unsaved Changes##ExitUnsavedModal");
+            _openUnsavedBeforeExitModal = false;
         }
         if (_openOpenLevelModal)
         {
@@ -2575,6 +2651,7 @@ public sealed class EditorApp : IDisposable
         DrawNewLevelModal();
         DrawUnsavedBeforeOpenModal();
         DrawUnsavedBeforeSampleModal();
+        DrawUnsavedBeforeExitModal();
         DrawOpenLevelModal();
         DrawOpenLevelErrorModal();
         DrawSaveLevelAsModal();
@@ -2695,6 +2772,46 @@ public sealed class EditorApp : IDisposable
             }
             ImGui.SameLine();
             if (ImGui.Button("Cancel##SampleLevelUnsavedCancel", new Vector2(100, 0)))
+            {
+                ImGui.CloseCurrentPopup();
+            }
+
+            ImGui.EndPopup();
+        }
+    }
+
+    private void DrawUnsavedBeforeExitModal()
+    {
+        bool isOpen = true;
+        if (ImGui.BeginPopupModal("Unsaved Changes##ExitUnsavedModal", ref isOpen, ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            ImGui.Text("You have unsaved changes in the current level.\nDo you want to save before exiting Leed3D?");
+            ImGui.Separator();
+
+            if (ImGui.Button("Save##ExitSave", new Vector2(100, 0)))
+            {
+                ImGui.CloseCurrentPopup();
+                if (!string.IsNullOrWhiteSpace(CurrentFilePath))
+                {
+                    if (SaveLevelAs(CurrentFilePath))
+                    {
+                        _exitRequested = true;
+                    }
+                }
+                else
+                {
+                    _pendingActionAfterSaveAs = PendingDocumentAction.ExitApplication;
+                    PromptSaveLevelAs();
+                }
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Don't Save##ExitDiscard", new Vector2(100, 0)))
+            {
+                ImGui.CloseCurrentPopup();
+                _exitRequested = true;
+            }
+            ImGui.SameLine();
+            if (ImGui.Button("Cancel##ExitUnsavedCancel", new Vector2(100, 0)))
             {
                 ImGui.CloseCurrentPopup();
             }
@@ -2944,7 +3061,19 @@ public sealed class EditorApp : IDisposable
 
     private void DrawCsgPanel()
     {
-        ImGui.Begin("CSG Booleans");
+        if (!ShowCsgPanel)
+        {
+            return;
+        }
+
+        bool showCsg = ShowCsgPanel;
+        if (!ImGui.Begin("CSG Booleans", ref showCsg))
+        {
+            ShowCsgPanel = showCsg;
+            ImGui.End();
+            return;
+        }
+        ShowCsgPanel = showCsg;
 
         if (Selection.Mode != InteractionMode.Object)
         {

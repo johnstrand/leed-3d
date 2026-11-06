@@ -31,7 +31,19 @@ public sealed class SceneOutlinerPanel
 
     private void DrawOutliner(EditorApp app)
     {
-        ImGui.Begin("Scene Outliner");
+        if (!app.ShowSceneOutliner)
+        {
+            return;
+        }
+
+        bool show = app.ShowSceneOutliner;
+        if (!ImGui.Begin("Scene Outliner", ref show))
+        {
+            app.ShowSceneOutliner = show;
+            ImGui.End();
+            return;
+        }
+        app.ShowSceneOutliner = show;
 
         // Search Filter
         ImGui.SetNextItemWidth(-1);
@@ -324,7 +336,19 @@ public sealed class SceneOutlinerPanel
 
     private void DrawTransformInspector(EditorApp app)
     {
-        ImGui.Begin("Transform Inspector");
+        if (!app.ShowTransformInspector)
+        {
+            return;
+        }
+
+        bool show = app.ShowTransformInspector;
+        if (!ImGui.Begin("Transform Inspector", ref show))
+        {
+            app.ShowTransformInspector = show;
+            ImGui.End();
+            return;
+        }
+        app.ShowTransformInspector = show;
 
         int? activeObjId = app.Selection.ActiveObjectId;
         string? activeEntId = app.Selection.ActiveEntityId;
@@ -357,7 +381,11 @@ public sealed class SceneOutlinerPanel
 
     private void DrawObjectTransform(EditorApp app, SceneObject obj)
     {
-        ImGui.TextColored(new Vector4(0.3f, 0.85f, 1.0f, 1.0f), $"Object: {obj.Name} (ID: {obj.Id})");
+        int selectedCount = app.Selection.SelectedObjectIds.Count;
+        string headerText = selectedCount > 1
+            ? $"Object: {obj.Name} (ID: {obj.Id}) [+{selectedCount - 1} more selected]"
+            : $"Object: {obj.Name} (ID: {obj.Id})";
+        ImGui.TextColored(new Vector4(0.3f, 0.85f, 1.0f, 1.0f), headerText);
         ImGui.Separator();
 
         Transform3D t = obj.Transform;
@@ -370,33 +398,66 @@ public sealed class SceneOutlinerPanel
         if (ImGui.DragFloat3("Position (m)", ref pos, 0.05f))
         {
             EnsureDragSnapshot(app);
+            Vector3 delta = pos - t.Position;
             t.Position = pos;
+            if (selectedCount > 1)
+            {
+                foreach (int id in app.Selection.SelectedObjectIds)
+                {
+                    if (id != obj.Id && app.Scene.GetObject(id) is { Locked: false } other)
+                    {
+                        other.Transform.Position += delta;
+                    }
+                }
+            }
         }
         if (ImGui.IsItemDeactivatedAfterEdit())
         {
-            CommitDragSnapshot(app, "Move Object");
+            CommitDragSnapshot(app, selectedCount > 1 ? $"Move {selectedCount} Objects" : "Move Object");
         }
 
         // Rotation
         if (ImGui.DragFloat3("Rotation (°)", ref rot, 0.5f))
         {
             EnsureDragSnapshot(app);
+            Vector3 delta = rot - t.RotationEulerDegrees;
             t.RotationEulerDegrees = rot;
+            if (selectedCount > 1)
+            {
+                foreach (int id in app.Selection.SelectedObjectIds)
+                {
+                    if (id != obj.Id && app.Scene.GetObject(id) is { Locked: false } other)
+                    {
+                        other.Transform.RotationEulerDegrees += delta;
+                    }
+                }
+            }
         }
         if (ImGui.IsItemDeactivatedAfterEdit())
         {
-            CommitDragSnapshot(app, "Rotate Object");
+            CommitDragSnapshot(app, selectedCount > 1 ? $"Rotate {selectedCount} Objects" : "Rotate Object");
         }
 
         // Scale
         if (ImGui.DragFloat3("Scale", ref scale, 0.01f, 0.001f, 1000f))
         {
             EnsureDragSnapshot(app);
+            Vector3 delta = scale - t.Scale;
             t.Scale = scale;
+            if (selectedCount > 1)
+            {
+                foreach (int id in app.Selection.SelectedObjectIds)
+                {
+                    if (id != obj.Id && app.Scene.GetObject(id) is { Locked: false } other)
+                    {
+                        other.Transform.Scale = Vector3.Max(new Vector3(0.001f), other.Transform.Scale + delta);
+                    }
+                }
+            }
         }
         if (ImGui.IsItemDeactivatedAfterEdit())
         {
-            CommitDragSnapshot(app, "Scale Object");
+            CommitDragSnapshot(app, selectedCount > 1 ? $"Scale {selectedCount} Objects" : "Scale Object");
         }
 
         ImGui.Separator();
@@ -411,10 +472,20 @@ public sealed class SceneOutlinerPanel
         if (ImGui.Button("Origin to Geometry Centroid", new Vector2(-1, 0)))
         {
             EditorScene before = app.Scene.CloneSnapshot();
-            if (ObjectTransformOps.CenterOriginToCentroid(obj))
+            int modified = 0;
+            foreach (int id in app.Selection.SelectedObjectIds)
+            {
+                if (app.Scene.GetObject(id) is { Locked: false } target && ObjectTransformOps.CenterOriginToCentroid(target))
+                {
+                    modified++;
+                }
+            }
+            if (modified > 0)
             {
                 app.UndoStack.RecordAction("Origin to Centroid", before, app.Scene);
-                app.StatusMessage = $"Moved origin of {obj.Name} to geometry centroid.";
+                app.StatusMessage = modified == 1
+                    ? $"Moved origin of {obj.Name} to geometry centroid."
+                    : $"Moved origin of {modified} objects to geometry centroid.";
             }
         }
         if (ImGui.IsItemHovered())
@@ -425,10 +496,20 @@ public sealed class SceneOutlinerPanel
         if (ImGui.Button("Origin to Bottom Bounds", new Vector2(-1, 0)))
         {
             EditorScene before = app.Scene.CloneSnapshot();
-            if (ObjectTransformOps.CenterOriginToBottomBounds(obj))
+            int modified = 0;
+            foreach (int id in app.Selection.SelectedObjectIds)
+            {
+                if (app.Scene.GetObject(id) is { Locked: false } target && ObjectTransformOps.CenterOriginToBottomBounds(target))
+                {
+                    modified++;
+                }
+            }
+            if (modified > 0)
             {
                 app.UndoStack.RecordAction("Origin to Bottom Bounds", before, app.Scene);
-                app.StatusMessage = $"Moved origin of {obj.Name} to bottom bounds.";
+                app.StatusMessage = modified == 1
+                    ? $"Moved origin of {obj.Name} to bottom bounds."
+                    : $"Moved origin of {modified} objects to bottom bounds.";
             }
         }
         if (ImGui.IsItemHovered())
@@ -439,10 +520,20 @@ public sealed class SceneOutlinerPanel
         if (ImGui.Button("Apply / Freeze Scale & Rotation into Mesh", new Vector2(-1, 0)))
         {
             EditorScene before = app.Scene.CloneSnapshot();
-            if (ObjectTransformOps.FreezeScaleAndRotation(obj))
+            int modified = 0;
+            foreach (int id in app.Selection.SelectedObjectIds)
+            {
+                if (app.Scene.GetObject(id) is { Locked: false } target && ObjectTransformOps.FreezeScaleAndRotation(target))
+                {
+                    modified++;
+                }
+            }
+            if (modified > 0)
             {
                 app.UndoStack.RecordAction("Freeze Transform", before, app.Scene);
-                app.StatusMessage = $"Baked scale and rotation of {obj.Name} into mesh vertices.";
+                app.StatusMessage = modified == 1
+                    ? $"Baked scale and rotation of {obj.Name} into mesh vertices."
+                    : $"Baked scale and rotation of {modified} objects into mesh vertices.";
             }
         }
         if (ImGui.IsItemHovered())
@@ -458,7 +549,11 @@ public sealed class SceneOutlinerPanel
 
     private void DrawEntityTransform(EditorApp app, LevelEntity ent)
     {
-        ImGui.TextColored(new Vector4(0.9f, 0.7f, 0.2f, 1.0f), $"Entity: {ent.Id} [{ent.ClassName}]");
+        int selectedCount = app.Selection.SelectedEntityIds.Count;
+        string headerText = selectedCount > 1
+            ? $"Entity: {ent.Id} [{ent.ClassName}] [+{selectedCount - 1} more selected]"
+            : $"Entity: {ent.Id} [{ent.ClassName}]";
+        ImGui.TextColored(new Vector4(0.9f, 0.7f, 0.2f, 1.0f), headerText);
         ImGui.Separator();
 
         Transform3D t = ent.Transform;
@@ -471,33 +566,69 @@ public sealed class SceneOutlinerPanel
         if (ImGui.DragFloat3("Position (m)", ref pos, 0.05f))
         {
             EnsureDragSnapshot(app);
+            Vector3 delta = pos - t.Position;
             t.Position = pos;
+            if (selectedCount > 1)
+            {
+                foreach (string id in app.Selection.SelectedEntityIds)
+                {
+                    if (!string.Equals(id, ent.Id, StringComparison.OrdinalIgnoreCase) &&
+                        app.Scene.GetEntity(id) is { Locked: false } other)
+                    {
+                        other.Transform.Position += delta;
+                    }
+                }
+            }
         }
         if (ImGui.IsItemDeactivatedAfterEdit())
         {
-            CommitDragSnapshot(app, "Move Entity");
+            CommitDragSnapshot(app, selectedCount > 1 ? $"Move {selectedCount} Entities" : "Move Entity");
         }
 
         // Rotation
         if (ImGui.DragFloat3("Rotation (°)", ref rot, 0.5f))
         {
             EnsureDragSnapshot(app);
+            Vector3 delta = rot - t.RotationEulerDegrees;
             t.RotationEulerDegrees = rot;
+            if (selectedCount > 1)
+            {
+                foreach (string id in app.Selection.SelectedEntityIds)
+                {
+                    if (!string.Equals(id, ent.Id, StringComparison.OrdinalIgnoreCase) &&
+                        app.Scene.GetEntity(id) is { Locked: false } other)
+                    {
+                        other.Transform.RotationEulerDegrees += delta;
+                    }
+                }
+            }
         }
         if (ImGui.IsItemDeactivatedAfterEdit())
         {
-            CommitDragSnapshot(app, "Rotate Entity");
+            CommitDragSnapshot(app, selectedCount > 1 ? $"Rotate {selectedCount} Entities" : "Rotate Entity");
         }
 
         // Scale
         if (ImGui.DragFloat3("Scale", ref scale, 0.01f, 0.001f, 1000f))
         {
             EnsureDragSnapshot(app);
+            Vector3 delta = scale - t.Scale;
             t.Scale = scale;
+            if (selectedCount > 1)
+            {
+                foreach (string id in app.Selection.SelectedEntityIds)
+                {
+                    if (!string.Equals(id, ent.Id, StringComparison.OrdinalIgnoreCase) &&
+                        app.Scene.GetEntity(id) is { Locked: false } other)
+                    {
+                        other.Transform.Scale = Vector3.Max(new Vector3(0.001f), other.Transform.Scale + delta);
+                    }
+                }
+            }
         }
         if (ImGui.IsItemDeactivatedAfterEdit())
         {
-            CommitDragSnapshot(app, "Scale Entity");
+            CommitDragSnapshot(app, selectedCount > 1 ? $"Scale {selectedCount} Entities" : "Scale Entity");
         }
     }
 

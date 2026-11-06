@@ -21,7 +21,19 @@ public sealed class TextureBrowserPanel
     {
         ArgumentNullException.ThrowIfNull(app);
 
-        ImGui.Begin("Texture Browser");
+        if (!app.ShowTextureBrowser)
+        {
+            return;
+        }
+
+        bool show = app.ShowTextureBrowser;
+        if (!ImGui.Begin("Texture Browser", ref show))
+        {
+            app.ShowTextureBrowser = show;
+            ImGui.End();
+            return;
+        }
+        app.ShowTextureBrowser = show;
 
         // Filter / Search input
         ImGui.SetNextItemWidth(180.0f);

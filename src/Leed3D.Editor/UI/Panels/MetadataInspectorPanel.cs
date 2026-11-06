@@ -32,7 +32,19 @@ public sealed class MetadataInspectorPanel
     {
         ArgumentNullException.ThrowIfNull(app);
 
-        ImGui.Begin("Metadata Inspector");
+        if (!app.ShowMetadataInspector)
+        {
+            return;
+        }
+
+        bool show = app.ShowMetadataInspector;
+        if (!ImGui.Begin("Metadata Inspector", ref show))
+        {
+            app.ShowMetadataInspector = show;
+            ImGui.End();
+            return;
+        }
+        app.ShowMetadataInspector = show;
 
         if (app.Selection.Mode == InteractionMode.Object && app.Selection.SelectedEntityIds.Count > 0)
         {
